@@ -2565,12 +2565,14 @@ export default function App() {
             {isLoggingIn ? 'Autenticando...' : 'Entrar com Google'}
           </button>
 
-          <button 
-            onClick={handleDemoLogin}
-            className="w-full mt-3 bg-indigo-600 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 text-xs uppercase tracking-widest font-black"
-          >
-            <Icon name="Zap" size={16} /> Entrar em Modo Demonstração (Demo)
-          </button>
+          {process.env.NODE_ENV !== 'production' && (
+            <button 
+              onClick={handleDemoLogin}
+              className="w-full mt-3 bg-indigo-600 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 text-xs uppercase tracking-widest font-black"
+            >
+              <Icon name="Zap" size={16} /> Entrar em Modo Demonstração (Demo)
+            </button>
+          )}
           <p className="mt-8 text-[10px] text-slate-400 uppercase font-black tracking-widest leading-relaxed">
             Desenvolvido pela Diretoria de Contratações da Câmara Municipal de Curitiba
           </p>
