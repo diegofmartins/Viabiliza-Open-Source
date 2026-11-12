@@ -120,7 +120,9 @@ const TABLE_TEMPLATES = {
   `
 };
 
-// Helper function to initialize Gemini API with custom or environment key
+// Helper function to initialize Gemini API.
+// Global secret (server-side GEMINI_API_KEY) is the default for all users;
+// a per-user key (customKey) can override it when the TI team enables per-user keys.
 const getAiClient = (customKey?: string) => {
   const apiKey = (customKey && customKey.trim().length > 10) ? customKey.trim() : process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey.trim().length < 10) {
