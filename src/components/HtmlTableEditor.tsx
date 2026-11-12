@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { sanitizeHtml } from '../utils/sanitize';
 import { 
   Bold, Italic, Underline, Table, Code, Eye, 
   Trash2, FileText
@@ -273,7 +274,7 @@ export function HtmlTableEditor({ value, onChange, readOnly = false, placeholder
             contentEditable={!readOnly}
             onBlur={handleVisualChange}
             onInput={handleVisualChange}
-            dangerouslySetInnerHTML={{ __html: value || '' }}
+            dangerouslySetInnerHTML={{ __html: sanitizeHtml(value) }}
             className="flex-1 w-full p-6 outline-none bg-white font-sans text-sm overflow-y-auto contenteditable-custom min-h-[300px]"
             style={{
               minHeight: '300px',

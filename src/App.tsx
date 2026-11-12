@@ -1,3 +1,4 @@
+import * as React from 'react';
 import { useState, useEffect, Fragment, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from "motion/react";
 import { 
@@ -13,6 +14,7 @@ import { requestAiAssist, requestAiGenerateGlobal } from "./services/aiService";
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, Table as DocxTable, TableRow as DocxTableRow, TableCell as DocxTableCell, WidthType, ImageRun } from "docx";
 import { saveAs } from "file-saver";
 import { HtmlTableEditor } from "./components/HtmlTableEditor";
+import { sanitizeHtml } from "./utils/sanitize";
 
 import { auth, db, googleProvider, OperationType, handleFirestoreError } from "./firebase";
 import { signInWithPopup, signOut, onAuthStateChanged, User as FirebaseUser, browserPopupRedirectResolver } from "firebase/auth";
@@ -20,6 +22,10 @@ import {
   collection, query, where, onSnapshot, doc, setDoc, updateDoc, deleteDoc, 
   serverTimestamp, getDoc, addDoc, limit, getDocs, orderBy, writeBatch 
 } from "firebase/firestore";
+
+const TABLE_FIELD_IDS = ['tabela_estimativa_quantitativos_precos', 'tabela_riscos_interna', 'tabela_riscos_externa'];
+
+
 
 const SYSTEM_VERSION = "2.4.2";
 
@@ -530,7 +536,7 @@ const FileUploader = ({ value, onChange, readOnly = false }: { value: string, on
 
     setIsCompressing(true);
     try {
-      const compressionPromises = Array.from(files).map(file => compressImage(file));
+      const compressionPromises = Array.from(files).map((file: File) => compressImage(file));
       const compressedBase64s = await Promise.all(compressionPromises);
       
       const newImages = [...images, ...compressedBase64s].slice(0, 8);
@@ -1318,6 +1324,10 @@ export default function App() {
   };
 
   const handleDemoLogin = () => {
+    if (process.env.NODE_ENV === 'production') {
+      setApiError("Modo demonstração desabilitado em produção.");
+      return;
+    }
     const demoUser = {
       uid: 'demo-user-12345',
       email: 'diego.martins@cmc.pr.gov.br',
@@ -2403,7 +2413,7 @@ export default function App() {
             <div class="doc-container">
               <div class="header">
                 <h1>ESTUDO TÉCNICO PRELIMINAR</h1>
-                <div style="font-size: 12pt; margin-top: 10px; font-weight: bold;">${formData.etp_name || 'Sem título'}</div>
+                <div style="font-size: 12pt; margin-top: 10px; font-weight: bold;">${sanitizeHtml(formData.etp_name || 'Sem título')}</div>
               </div>
 
               <div class="section-title">I - INFORMAÇÕES GERAIS</div>
@@ -2441,13 +2451,13 @@ export default function App() {
                     return `
                       ${sectionHeader}
                       <div class="field-title">${item.label}</div>
-                      ${content ? `<div class="field-content">${content}</div>` : ''}
+                      ${content ? `<div class="field-content">${sanitizeHtml(content)}</div>` : ''}
                     `;
                   }
 
                   let displayContent = '';
-                  if (['tabela_estimativa_quantitativos_precos', 'tabela_riscos_interna', 'tabela_riscos_externa'].includes(String(item.id))) {
-                    displayContent = `<div class="tiptap-content">${String(content || '---')}</div>`;
+                  if (TABLE_FIELD_IDS.includes(String(item.id))) {
+                    displayContent = `<div class="tiptap-content">${sanitizeHtml(String(content || '---'))}</div>`;
                   } else if (item.id === 'fotos') {
                     try {
                       const images = JSON.parse(String(content));
@@ -2456,7 +2466,7 @@ export default function App() {
                       </div>`;
                     } catch (e) { displayContent = ''; }
                   } else {
-                    displayContent = `<div class="field-content">${content || '---'}</div>`;
+                    displayContent = `<div class="field-content">${sanitizeHtml(content || '---')}</div>`;
                   }
 
                   return `
@@ -2478,8 +2488,8 @@ export default function App() {
                     const [name, dept] = line.split(',').map(s => s.trim());
                     return `
                       <div class="signature-box">
-                        <strong>${(name || "").toUpperCase()}</strong><br/>
-                        ${dept || ""}
+                        <strong>${sanitizeHtml((name || "").toUpperCase())}</strong><br/>
+                        ${sanitizeHtml(dept || "")}
                       </div>
                     `;
                   }).join('')}
@@ -2902,10 +2912,10 @@ export default function App() {
                 {structure.find(s => s.id === aiPopup.fieldId)?.label}
               </h4>
               <div className="prose prose-slate prose-sm max-w-none">
-                {['tabela_estimativa_quantitativos_precos', 'tabela_riscos_interna', 'tabela_riscos_externa'].includes(aiPopup.fieldId) ? (
+                {TABLE_FIELD_IDS.includes(aiPopup.fieldId) ? (
                   <div 
                     className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm overflow-x-auto tiptap-content"
-                    dangerouslySetInnerHTML={{ __html: aiPopup.content }}
+                    dangerouslySetInnerHTML={{ __html: sanitizeHtml(aiPopup.content) }}
                   />
                 ) : (
                   <div className="text-slate-700 leading-relaxed text-sm whitespace-pre-wrap bg-white p-6 rounded-xl border border-slate-200 shadow-sm font-medium">
@@ -4530,10 +4540,10 @@ export default function App() {
                       return (
                         <div key={item.id} className="mb-8">
                           <h4 className="text-xs font-bold uppercase text-slate-500 mb-2">{item.label}</h4>
-                          {['tabela_estimativa_quantitativos_precos', 'tabela_riscos_interna', 'tabela_riscos_externa'].includes(String(item.id)) ? (
+                          {TABLE_FIELD_IDS.includes(String(item.id)) ? (
                             <div 
                               className="tiptap-content text-sm text-slate-700"
-                              dangerouslySetInnerHTML={{ __html: String(content || "Pendente.") }} 
+                              dangerouslySetInnerHTML={{ __html: sanitizeHtml(String(content || "Pendente.")) }} 
                             />
                           ) : item.id === 'fotos' ? (
                             <div className="grid grid-cols-2 gap-4 mt-4">
@@ -4597,11 +4607,11 @@ export default function App() {
               return (
                 <div key={item.id} style={{marginBottom: '25px'}}>
                   <h2 style={{fontSize: '12pt', fontWeight: 'bold', textTransform: 'uppercase', borderBottom: '1px solid black', marginTop: '15pt', paddingBottom: '3pt'}}>{item.label}</h2>
-                  {['tabela_estimativa_quantitativos_precos', 'tabela_riscos_interna', 'tabela_riscos_externa'].includes(String(item.id)) ? (
+                  {TABLE_FIELD_IDS.includes(String(item.id)) ? (
                     <div 
                       className="tiptap-content"
                       style={{ fontSize: '11pt' }}
-                      dangerouslySetInnerHTML={{ __html: String(content || "Não informado.") }} 
+                      dangerouslySetInnerHTML={{ __html: sanitizeHtml(String(content || "Não informado.")) }} 
                     />
                   ) : item.id === 'fotos' ? (
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginTop: '10px' }}>
