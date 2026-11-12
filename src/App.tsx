@@ -9,6 +9,7 @@ import {
   RefreshCcw, LogOut, FileDown, Users
 } from "lucide-react";
 import { ETPData, DFDData, ETPField, ETPStructureItem, ETPExample } from "./types";
+import { INITIAL_STATE, INITIAL_DFD_STATE } from "./constants/etpInitialState";
 import { notifyNewUserRegistration, notifyUserApproved, notifyNewETPCreated, sendGoogleChatNotification } from "./services/notificationService";
 import { requestAiAssist, requestAiGenerateGlobal } from "./services/aiService";
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, Table as DocxTable, TableRow as DocxTableRow, TableCell as DocxTableCell, WidthType, ImageRun } from "docx";
@@ -635,47 +636,6 @@ const TABLE_TEMPLATES = {
   `
 };
 
-const INITIAL_STATE: ETPData = {
-  etp_name: 'Novo Estudo (VIABILIZA)',
-  diag_problema_necessidade: '', diag_alternativas_solucao: '', diag_objeto_vigencia: '', diag_exigencias_padroes: '',
-  diag_quantidades_valor: '', diag_parcelamento_providencias: '', diag_correlatas_ambientais: '', diag_riscos_sucesso: '',
-  processo_spae: '', unidade_requisitante: '', responsavel: '',
-  justificativa_necessidade: '', levantamento_mercado: '',
-  objeto_sucinto: '', especificacoes_tecnicas: '', requisitos_header: '', descricao_solucao_integral: '',
-  requisitos_exigencias: '', requisitos_qualidade: '', requisitos_marca: '', requisitos_continuos: '',
-  requisitos_amostra: '', requisitos_transicao: '',
-  garantia_contratual: '', garantia_tecnica: '', assistencia_tecnica: '',
-  requisitos_vistoria: '', requisitos_subcontratacao: '', requisitos_execucao: '', requisitos_dimensionamento: '',
-  estimativa_quantidades_texto: '', estimativa_valor_texto: '',
-  tabela_estimativa_quantitativos_precos: '<table style="border-collapse:collapse;width:100%;border:1px solid #000"><thead><tr style="background-color:#e2e8f0"><th style="border:1px solid #000;padding:8px;text-align:center">Item</th><th style="border:1px solid #000;padding:8px;text-align:center">Descrição</th><th style="border:1px solid #000;padding:8px;text-align:center">Quantidade</th><th style="border:1px solid #000;padding:8px;text-align:center">Valor Unitário</th><th style="border:1px solid #000;padding:8px;text-align:center">Valor Total</th></tr></thead><tbody><tr><td style="border:1px solid #000;padding:8px;text-align:center">1</td><td style="border:1px solid #000;padding:8px">&nbsp;</td><td style="border:1px solid #000;padding:8px">&nbsp;</td><td style="border:1px solid #000;padding:8px">&nbsp;</td><td style="border:1px solid #000;padding:8px">&nbsp;</td></tr><tr><td style="border:1px solid #000;padding:8px;text-align:center">2</td><td style="border:1px solid #000;padding:8px">&nbsp;</td><td style="border:1px solid #000;padding:8px">&nbsp;</td><td style="border:1px solid #000;padding:8px">&nbsp;</td><td style="border:1px solid #000;padding:8px">&nbsp;</td></tr><tr style="background-color:#e2e8f0;font-weight:bold"><td colspan="4" style="border:1px solid #000;padding:8px;text-align:center uppercase">TOTAL ESTIMADO</td><td style="border:1px solid #000;padding:8px;text-align:center">R$ 0,00</td></tr></tbody></table>',
-  justificativa_parcelamento: '', resultados_pretendidos: '',
-  providencias_adm: '', contratacoes_correlatas: '', impactos_ambientais: '',
-  alinhamento_planejamento: '', posicionamento_conclusivo: '',
-  analise_riscos_resumo: '', 
-  tabela_riscos_interna: '<table style="border-collapse:collapse;width:100%;border:1px solid #000"><thead><tr style="background-color:#e2e8f0"><th style="border:1px solid #000;padding:8px;text-align:right;width:15%">FASE:</th><th colspan="4" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">INTERNA</th></tr><tr style="background-color:#e2e8f0"><th colspan="5" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">Riscos referente a fase de análise escolhida:</th></tr></thead><tbody><tr style="background-color:#f1f5f9"><th colspan="5" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">RISCO 1</th></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold;width:20%">Situação de Risco:</td><td colspan="4" style="border:1px solid #000;padding:8px">Atrasos na contratação decorrentes de atraso na tramitação do processo administrativo. <strong>[EXEMPLO]</strong></td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Probabilidade:</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Baixa</td><td style="border:1px solid #000;padding:8px;text-align:center">( x ) Média</td><td colspan="2" style="border:1px solid #000;padding:8px;text-align:center">( ) Alta</td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Impacto:</td><td style="border:1px solid #000;padding:8px;text-align:center">( x ) Baixo</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Médio</td><td colspan="2" style="border:1px solid #000;padding:8px;text-align:center">( ) Alto</td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Plano de Mitigação:</td><td colspan="4" style="border:1px solid #000;padding:8px">Acompanhamento do processo e apoio às áreas envolvidas. <strong>[EXEMPLO]</strong></td></tr><tr style="background-color:#f1f5f9"><th colspan="5" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">RISCO 2</th></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Situação de Risco:</td><td colspan="4" style="border:1px solid #000;padding:8px">Equívocos nos quantitativos estimados. <strong>[EXEMPLO]</strong></td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Probabilidade:</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Baixa</td><td style="border:1px solid #000;padding:8px;text-align:center">( x ) Média</td><td colspan="2" style="border:1px solid #000;padding:8px;text-align:center">( ) Alta</td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Impacto:</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Baixo</td><td style="border:1px solid #000;padding:8px;text-align:center">( x ) Médio</td><td colspan="2" style="border:1px solid #000;padding:8px;text-align:center">( ) Alto</td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Plano de Mitigação:</td><td colspan="4" style="border:1px solid #000;padding:8px">A área demandante deve prever o quantitativo dos itens tomando como base o consumo histórico dos anos anteriores, bem como seu planejamento futuro. <strong>[EXEMPLO]</strong></td></tr><tr><td colspan="5" style="border:1px solid #000;padding:8px;text-align:center">(...)</td></tr></tbody></table>', 
-  tabela_riscos_externa: '<table style="border-collapse:collapse;width:100%;border:1px solid #000"><thead><tr style="background-color:#e2e8f0"><th style="border:1px solid #000;padding:8px;text-align:right;width:15%">FASE:</th><th colspan="4" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">EXTERNA</th></tr><tr style="background-color:#e2e8f0"><th colspan="5" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">Riscos referente a fase de análise escolhida:</th></tr></thead><tbody><tr style="background-color:#f1f5f9"><th colspan="5" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">RISCO 1</th></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold;width:20%">Situação de Risco:</td><td colspan="4" style="border:1px solid #000;padding:8px">Ausência de empresas que atendam aos requisitos da contratação. <strong>[EXEMPLO]</strong></td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Probabilidade:</td><td style="border:1px solid #000;padding:8px;text-align:center">( x ) Baixa</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Média</td><td colspan="2" style="border:1px solid #000;padding:8px;text-align:center">( ) Alta</td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Impacto:</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Baixo</td><td style="border:1px solid #000;padding:8px;text-align:center">( x ) Médio</td><td colspan="2" style="border:1px solid #000;padding:8px;text-align:center">( ) Alto</td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Plano de Mitigação:</td><td colspan="4" style="border:1px solid #000;padding:8px">Ampla pesquisa preliminar, pela Diretoria de Contratações, sobre as empresas disponíveis no mercado e confirmação junto às empresas se elas atendem aos requisitos da contratação. <strong>[EXEMPLO]</strong></td></tr><tr style="background-color:#f1f5f9"><th colspan="5" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">RISCO 2</th></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Situação de Risco:</td><td colspan="4" style="border:1px solid #000;padding:8px">Impugnação e recursos no percurso do processo licitatório, ocasionando atrasos. <strong>[EXEMPLO]</strong></td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Probabilidade:</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Baixa</td><td style="border:1px solid #000;padding:8px;text-align:center">( x ) Médio</td><td colspan="2" style="border:1px solid #000;padding:8px;text-align:center">( ) Alta</td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Impacto:</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Baixo</td><td style="border:1px solid #000;padding:8px;text-align:center">( x ) Médio</td><td colspan="2" style="border:1px solid #000;padding:8px;text-align:center">( ) Alto</td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Plano de Mitigação:</td><td colspan="4" style="border:1px solid #000;padding:8px">Elaboração do termo de referência e edital da licitação com equipe das áreas de Planejamento, Contratações, Contratos e Jurídica e com participação ativa da área requisitante, subsidiando as demais com informações relevantes para o delineamento do objeto e eventuais esclarecimentos. <strong>[EXEMPLO]</strong></td></tr><tr><td colspan="5" style="border:1px solid #000;padding:8px;text-align:center">(...)</td></tr></tbody></table>',
-  include_riscos_interna: false,
-  include_riscos_externa: false,
-  fotos: '',
-  data_documento: new Date().toISOString().split('T')[0],
-  assinaturas: '',
-  status: 'in_progress',
-  _version: 2,
-};
-
-const INITIAL_DFD_STATE: DFDData = {
-  dfd_name: 'Novo DFD (VIABILIZA)',
-  diag_area_requisitante: '',
-  diag_dispensa_etp: '',
-  diag_justificativa_necessidade: '',
-  diag_descricao_solucao: '',
-  diag_estimativa_quantidades: '',
-  diag_estimativa_valor: '',
-  diag_requisitos_tecnicos: '',
-  diag_cronograma_prioridade: '',
-  status: 'in_progress',
-  _version: 1,
-};
 
 const base64ToUint8Array = (base64: string) => {
   const binaryString = window.atob(base64.split(',')[1]);
