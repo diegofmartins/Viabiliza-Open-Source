@@ -25,6 +25,15 @@ import {
 
 const TABLE_FIELD_IDS = ['tabela_estimativa_quantitativos_precos', 'tabela_riscos_interna', 'tabela_riscos_externa'];
 
+// Evita que a interface fique presa em "Salvando..." caso o Firestore
+// demore ou nao responda (banco inexistente, rede bloqueada, etc.).
+const withTimeout = <T,>(promise: Promise<T>, ms: number, message: string): Promise<T> =>
+  Promise.race([
+    promise,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(message)), ms)),
+  ]);
+
+
 
 
 const SYSTEM_VERSION = "2.4.2";
@@ -1406,12 +1415,20 @@ export default function App() {
       }
 
       if (currentDraftId) {
-        await updateDoc(doc(db, 'etps', currentDraftId), draftData);
+        await withTimeout(
+          updateDoc(doc(db, 'etps', currentDraftId), draftData),
+          30000,
+          "Tempo esgotado ao salvar. Verifique sua conexao e as regras do banco de dados."
+        );
       } else {
-        const docRef = await addDoc(collection(db, 'etps'), {
-          ...draftData,
-          createdAt: serverTimestamp()
-        });
+        const docRef = await withTimeout(
+          addDoc(collection(db, 'etps'), {
+            ...draftData,
+            createdAt: serverTimestamp()
+          }),
+          30000,
+          "Tempo esgotado ao salvar. Verifique sua conexao e as regras do banco de dados."
+        );
         setCurrentDraftId(docRef.id);
         
         // Notify about new ETP
