@@ -35,6 +35,10 @@ jobs:
         run: npm install --legacy-peer-deps
         
       - name: Build
+        env:
+          # Deriva o caminho base do nome do repositorio, evitando quebrar
+          # os arquivos (assets) quando o repositorio e renomeado.
+          BASE_PATH: /${{ github.event.repository.name }}/
         run: |
           npm run build
           cp dist/index.html dist/404.html
