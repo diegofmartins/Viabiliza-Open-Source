@@ -1,4 +1,5 @@
 import { ETPData, ETPField } from "../types";
+import { auth } from "../firebase";
 
 /**
  * URL base do backend de IA (opcional).
@@ -8,6 +9,24 @@ import { ETPData, ETPField } from "../types";
  */
 const AI_API_BASE = (import.meta.env.VITE_AI_API_URL || "").replace(/\/+$/, "");
 const aiUrl = (path: string) => `${AI_API_BASE}${path}`;
+
+/**
+ * Cabecalhos da requisicao, incluindo o token do usuario logado.
+ * O backend recusa chamadas sem token valido.
+ */
+async function aiHeaders(): Promise<Record<string, string>> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const user = auth.currentUser;
+  if (user) {
+    try {
+      headers.Authorization = `Bearer ${await user.getIdToken()}`;
+    } catch {
+      // Sem token valido a requisicao sera recusada pelo servidor com 401.
+    }
+  }
+  return headers;
+}
+
 
 
 /**
@@ -24,7 +43,7 @@ export async function requestAiAssist(params: {
 
   const res = await fetch(aiUrl("/api/ai/assist"), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await aiHeaders(),
     body: JSON.stringify({
       fieldId,
       fieldName,
@@ -57,7 +76,7 @@ export async function requestAiGenerateGlobal(params: {
 
   const res = await fetch(aiUrl("/api/ai/generate-global"), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await aiHeaders(),
     body: JSON.stringify({
       diag_problema_necessidade: formData.diag_problema_necessidade || "",
       diag_alternativas_solucao: formData.diag_alternativas_solucao || "",

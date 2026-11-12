@@ -3,14 +3,37 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import firebaseConfig from "./firebase-applet-config.json";
 
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 app.disable("x-powered-by");
 app.use(express.json({ limit: "15mb" }));
+
+// --- CORS: permite que o frontend estatico (ex.: GitHub Pages) chame a API ---
+// Configure CORS_ORIGINS com a lista separada por virgula, ex.:
+// CORS_ORIGINS=https://diegofmartins.github.io
+const allowedOrigins = (process.env.CORS_ORIGINS || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.setHeader("Access-Control-Max-Age", "86400");
+  }
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+  next();
+});
 
 // --- Security: protect AI generation endpoints ---
 const AI_RATE_LIMIT = 10;
@@ -24,9 +47,19 @@ const verifyAiAuth = async (req: express.Request, res: express.Response, next: e
     return res.status(401).json({ error: "Token de autenticação ausente." });
   }
   try {
-    const tokenRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?token=${encodeURIComponent(token)}`);
+    // Valida o ID token do Firebase usando a API oficial do Identity Toolkit.
+    // A API key usada aqui e a chave web publica do projeto (nao e segredo).
+    const firebaseApiKey = process.env.FIREBASE_API_KEY || firebaseConfig.apiKey;
+    const tokenRes = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(firebaseApiKey)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken: token }),
+      }
+    );
     const tokenData: any = await tokenRes.json().catch(() => null);
-    const uid = tokenData?.user_id;
+    const uid = tokenData?.users?.[0]?.localId;
     if (!uid) {
       return res.status(401).json({ error: "Token inválido ou expirado." });
     }

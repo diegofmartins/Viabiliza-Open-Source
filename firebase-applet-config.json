@@ -3,7 +3,7 @@
   "appId": "1:904692915181:web:9e5345c189857f2392a5e4",
   "apiKey": "AIzaSyC6vx1HoA85eSfvmBUTai-5IdFehbe_9HI",
   "authDomain": "viabilizaopensource.firebaseapp.com",
-  "firestoreDatabaseId": "-default-",
+  "firestoreDatabaseId": "(default)",
   "storageBucket": "viabilizaopensource.firebasestorage.app",
   "messagingSenderId": "904692915181",
   "measurementId": "",
