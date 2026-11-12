@@ -1,0 +1,4679 @@
+import { useState, useEffect, Fragment, useMemo, useRef } from 'react';
+import { motion, AnimatePresence } from "motion/react";
+import { 
+  FileText, ClipboardList, Target, CheckCircle, Sparkles, Loader2, Printer, 
+  Layout, BarChart, ShieldCheck, Leaf, Settings, Zap, Wand2, Eye, Edit3, 
+  AlertTriangle, ChevronDown, ChevronUp, Download, Info, Trash2, PlusCircle,
+  ImagePlus, X, ChevronLeft, ChevronRight, ArrowLeft, Lightbulb, Settings2,
+  RefreshCcw, LogOut, FileDown, Users
+} from "lucide-react";
+import { ETPData, DFDData, ETPField, ETPStructureItem, ETPExample } from "./types";
+import { notifyNewUserRegistration, notifyUserApproved, notifyNewETPCreated, sendGoogleChatNotification } from "./services/notificationService";
+import { requestAiAssist, requestAiGenerateGlobal } from "./services/aiService";
+import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, Table as DocxTable, TableRow as DocxTableRow, TableCell as DocxTableCell, WidthType, ImageRun } from "docx";
+import { saveAs } from "file-saver";
+import { HtmlTableEditor } from "./components/HtmlTableEditor";
+
+import { auth, db, googleProvider, OperationType, handleFirestoreError } from "./firebase";
+import { signInWithPopup, signOut, onAuthStateChanged, User as FirebaseUser, browserPopupRedirectResolver } from "firebase/auth";
+import { 
+  collection, query, where, onSnapshot, doc, setDoc, updateDoc, deleteDoc, 
+  serverTimestamp, getDoc, addDoc, limit, getDocs, orderBy, writeBatch 
+} from "firebase/firestore";
+
+const SYSTEM_VERSION = "2.4.2";
+
+const SYSTEM_PROMPT = `Você é um Especialista em Contratações Públicas da Câmara Municipal de Curitiba (CMC), com profundo conhecimento da Lei 14.133/2021.
+Sua tarefa é elaborar ou revisar seções de um Estudo Técnico Preliminar (ETP) seguindo RIGOROSAMENTE as diretrizes abaixo:
+
+1. JUSTIFICATIVA (Descrição da Necessidade): FOQUE NO PROBLEMA, não na solução. Responda: Qual o problema? Qual o interesse público? Quais benefícios ao resolvê-lo? (Ex: "A lentidão dos equipamentos atuais está atrasando o atendimento ao cidadão", e não "precisamos de computadores").
+2. LEVANTAMENTO DE MERCADO: Não pesquise apenas preços. Analise modelos de contratação, tecnologias e abordagens. Considere o custo-benefício e o ciclo de vida.
+3. DESCRIÇÃO DA SOLUÇÃO: Detalhe a solução escolhida considerando todo o ciclo de vida (entrega, instalação, manutenção, descarte).
+4. REQUISITOS: Devem ser essenciais e não restritivos. Garanta qualidade, desempenho e segurança.
+5. CARACTERIZAÇÃO DE SERVIÇOS OU FORNECIMENTOS CONTÍNUOS (Item 6.3): Determine se o objeto é de natureza contínua (auxiliares e necessários à Administração, que se interrompidos comprometem atividades essenciais e estendem-se por mais de um exercício). Exemplos: vigilância, limpeza, manutenção elétrica/elevadores/veículos.
+6. ALINHAMENTO: Mencione o "Planejamento Estratégico 2022-2031" e o "Plano de Contratações Anual (PCA)" APENAS na seção específica de Alinhamento ao Planejamento. Evite repetir essa informação em outras seções.
+7. LINGUAGEM: Formal, técnica, EXTREMAMENTE concisa e objetiva. Evite textos longos, redundantes ou prolixos.
+8. FORMATAÇÃO E REGRAS DE ESCRITA:
+   - NÃO use markdown (não use # para títulos, não use * ou ** para negrito/itálico).
+   - NÃO inclua introduções, saudações ou comentários.
+   - NÃO inclua o nome da seção ou o título do campo no início do texto gerado.
+   - NÃO repita as mesmas frases ou justificativas em múltiplos campos.
+   - Retorne APENAS o texto que será inserido diretamente no documento final.
+   - Em chamadas globais que solicitam JSON, retorne SEMPRE um JSON válido e puro, sem textos explicativos antes ou depois.
+   - Use listas com hífens (-) para clareza quando necessário.
+   - Utilize os dados de DIAGNÓSTICO INICIAL para fundamentar todas as seções.
+
+9. REGRA DE EXCLUSÃO:
+   - NUNCA gere conteúdo para o campo "assinaturas" (Assinaturas). Este campo deve permanecer vazio para preenchimento manual do usuário.
+
+10. REGRAS PARA CAMPOS DE TABELA (MUITO IMPORTANTE):
+   - Os campos "tabela_estimativa_quantitativos_precos", "tabela_riscos_interna" e "tabela_riscos_externa" DEVEM obrigatoriamente retornar uma tabela em HTML puro, seguindo EXATAMENTE a estrutura de bordas e cores das tabelas modelo (use border: 1px solid #000 e background-color: #e2e8f0 para cabeçalhos).
+   - Para tabelas de riscos, marque a Probabilidade e o Impacto com "( x )" na célula correspondente e "( )" nas demais.
+   - Não use classes CSS externas, apenas estilos inline (style="...").
+
+REGRA CRÍTICA DE PREENCHIMENTO:
+Se os dados fornecidos no Diagnóstico Inicial forem insuficientes para gerar um conteúdo técnico completo e preciso para um determinado campo, você DEVE:
+1. Iniciar a resposta com a frase "NECESSITA COMPLEMENTAÇÃO" em letras maiúsculas.
+2. Pular uma linha em branco.
+3. Fornecer o melhor rascunho possível com as informações disponíveis, indicando entre colchetes [ ] o que o usuário precisa detalhar.`;
+
+const structure: ETPStructureItem[] = [
+  // NOVOS CAMPOS OBRIGATÓRIOS (Diagnóstico Inicial Baseado na Lei 14.133/2021)
+  { 
+    id: 'diag_problema_necessidade', 
+    label: '1. Qual é o problema ou necessidade que motiva esta contratação e o que se espera alcançar?', 
+    icon: 'AlertTriangle', 
+    section: '0. DIAGNÓSTICO INICIAL', 
+    isAiEnabled: false, 
+    isEssential: true,
+    placeholder: 'Descreva o problema e os resultados pretendidos.',
+    examples: [
+      { title: 'Material de Expediente', content: '"O estoque atual de material de expediente está criticamente baixo, resultando em interrupções nas atividades administrativas e didáticas. A contratação visa garantir o suprimento contínuo por 12 meses, evitando paralisações e otimizando o fluxo de trabalho."' },
+      { title: 'Manutenção de Ar-Condicionado', content: '"Os equipamentos de ar-condicionado apresentam falhas frequentes, comprometendo o conforto térmico e a qualidade do ar nos ambientes. A contratação busca assegurar o funcionamento adequado de todos os aparelhos, prolongar sua vida útil e reduzir em 30% os chamados emergenciais."' }
+    ]
+  },
+  { 
+    id: 'diag_alternativas_solucao', 
+    label: '2. Quais alternativas foram estudadas para resolver o problema e por que a solução escolhida é a melhor?', 
+    icon: 'Eye', 
+    section: '0. DIAGNÓSTICO INICIAL', 
+    isAiEnabled: false, 
+    isEssential: true,
+    placeholder: 'Descreva as alternativas e a justificativa da escolha.',
+    examples: [
+      { title: 'Material de Expediente', content: '"Analisamos a compra avulsa versus a contratação de fornecedor único por ata de registro de preços. A ata demonstrou ser mais vantajosa pela padronização, economia de escala e agilidade na aquisição, com redução de 15% nos custos anuais em comparação com compras pontuais."' },
+      { title: 'Manutenção de Ar-Condicionado', content: '"Foram avaliadas a manutenção corretiva pontual e a manutenção preventiva e corretiva contínua. A manutenção preventiva e corretiva contínua foi selecionada por ser mais eficaz na prevenção de falhas, otimizando o desempenho dos equipamentos e evitando gastos emergenciais maiores."' }
+    ]
+  },
+  { 
+    id: 'diag_objeto_vigencia', 
+    label: '3. Como você descreveria o objeto de forma técnica e qual o prazo de vigência necessário?', 
+    icon: 'Target', 
+    section: '0. DIAGNÓSTICO INICIAL', 
+    isAiEnabled: false, 
+    isEssential: true,
+    placeholder: 'Descrição técnica do objeto e prazo.',
+    examples: [
+      { title: 'Material de Expediente', content: '"Aquisição de material de expediente, incluindo papel A4, canetas esferográficas, pastas e envelopes, conforme especificações do Anexo I. O prazo de vigência será de 12 meses, com entregas parceladas conforme demanda."' },
+      { title: 'Manutenção de Ar-Condicionado', content: '"Prestação de serviços de manutenção preventiva e corretiva em 50 equipamentos de ar-condicionado (splits e centrais), incluindo mão de obra, peças e componentes. O prazo de vigência será de 24 meses, prorrogável por até 60 meses, por se tratar de serviço contínuo."' }
+    ]
+  },
+  { 
+    id: 'diag_exigencias_padroes', 
+    label: '4. Quais são as exigências técnicas, padrões de qualidade e regras de execução indispensáveis?', 
+    icon: 'CheckCircle', 
+    section: '0. DIAGNÓSTICO INICIAL', 
+    isAiEnabled: false, 
+    isEssential: true,
+    placeholder: 'Requisitos, qualidade e execução.',
+    examples: [
+      { title: 'Material de Expediente', content: '"Os materiais devem ser de primeira linha, com certificação ISO 9001 para o fabricante. As entregas devem ser realizadas em até 5 dias úteis após a solicitação, no almoxarifado da CMC, em horário comercial."' },
+      { title: 'Manutenção de Ar-Condicionado', content: '"Os técnicos devem possuir certificação NR-10 e NR-35. A manutenção preventiva deve ser mensal, com relatório detalhado. O tempo máximo de atendimento para chamados corretivos emergenciais é de 4 horas, com solução em até 24 horas."' }
+    ]
+  },
+  { 
+    id: 'diag_quantidades_valor', 
+    label: '5. Qual a quantidade estimada de itens/serviços e qual o valor global previsto?', 
+    icon: 'BarChart', 
+    section: '0. DIAGNÓSTICO INICIAL', 
+    isAiEnabled: false, 
+    isEssential: true,
+    placeholder: 'Quantidades e estimativa de valor.',
+    examples: [
+      { title: 'Material de Expediente', content: '"Estimamos o consumo anual de 100 caixas de papel A4, 500 canetas e 200 pastas, com base no histórico dos últimos 2 anos. O valor unitário médio do papel A4 é de R$ 80,00/caixa, totalizando um valor anual estimado de R$ 25.000,00 para todos os itens."' },
+      { title: 'Manutenção de Ar-Condicionado', content: '"A estimativa é de 50 equipamentos, com base no inventário atual. O valor mensal por equipamento para manutenção preventiva e corretiva é de R$ 150,00, resultando em um valor anual estimado de R$ 90.000,00."' }
+    ]
+  },
+  { 
+    id: 'diag_parcelamento_providencias', 
+    label: '6. A contratação será dividida em lotes/itens? Existem providências prévias que a Administração deve tomar?', 
+    icon: 'Layout', 
+    section: '0. DIAGNÓSTICO INICIAL', 
+    isAiEnabled: false, 
+    isEssential: true,
+    placeholder: 'Parcelamento e providências prévias.',
+    examples: [
+      { title: 'Material de Expediente', content: '"A contratação será por item, permitindo maior competitividade e a aquisição de diferentes marcas. A Administração deverá designar um fiscal de contrato para acompanhar as entregas e a qualidade dos materiais."' },
+      { title: 'Manutenção de Ar-Condicionado', content: '"A contratação será em lote único, pois a divisão poderia comprometer a responsabilidade técnica e a eficiência da manutenção. A Administração deverá fornecer acesso aos locais dos equipamentos e um ponto de apoio para a equipe técnica."' }
+    ]
+  },
+  { 
+    id: 'diag_correlatas_ambientais', 
+    label: '7. Existem outras contratações relacionadas a esta ou impactos ambientais que precisam ser mitigados?', 
+    icon: 'Leaf', 
+    section: '0. DIAGNÓSTICO INICIAL', 
+    isAiEnabled: false, 
+    isEssential: true,
+    placeholder: 'Contratações correlatas e impactos ambientais.',
+    examples: [
+      { title: 'Material de Expediente', content: '"Contratação correlata: serviço de reprografia. Impacto ambiental: consumo de recursos naturais e geração de resíduos. Medida mitigadora: exigência de materiais reciclados ou recicláveis e descarte adequado via coleta seletiva."' },
+      { title: 'Manutenção de Ar-Condicionado', content: '"Contratação interdependente: fornecimento de energia elétrica. Impacto ambiental: consumo de energia e descarte de fluidos refrigerantes. Medida mitigadora: exigência de equipamentos com selo Procel A e descarte de fluidos conforme normas ambientais vigentes."' }
+    ]
+  },
+  { 
+    id: 'diag_riscos_sucesso', 
+    label: '8. Quais são os principais riscos que podem atrapalhar o sucesso desta contratação?', 
+    icon: 'AlertTriangle', 
+    section: '0. DIAGNÓSTICO INICIAL', 
+    isAiEnabled: false, 
+    isEssential: true,
+    placeholder: 'Riscos e medidas de mitigação.',
+    examples: [
+      { title: 'Material de Expediente', content: '"Risco: Atraso na entrega dos materiais. Mitigação: Aplicação de multas contratuais e previsão de fornecedores alternativos. Conclusão: A contratação é viável e essencial para a continuidade das operações administrativas."' },
+      { title: 'Manutenção de Ar-Condicionado', content: '"Risco: Indisponibilidade de peças de reposição. Mitigação: Exigência de estoque mínimo de peças críticas e prazos de reposição definidos em contrato. Conclusão: A contratação é viável e fundamental para garantir o conforto e a saúde ocupacional."' }
+    ]
+  },
+  { 
+    id: 'unidade_requisitante', 
+    label: 'Área Demandante', 
+    icon: 'Target', 
+    section: 'I - INFORMAÇÕES GERAIS', 
+    isAiEnabled: false, 
+    isEssential: true,
+    placeholder: 'Ex: Diretoria de Tecnologia'
+  },
+  { 
+    id: 'processo_spae', 
+    label: 'Nº Processo SPAE', 
+    icon: 'FileText', 
+    section: 'I - INFORMAÇÕES GERAIS', 
+    isAiEnabled: false, 
+    isEssential: false,
+    placeholder: 'Ex: 0123/2026'
+  },
+  { 
+    id: 'justificativa_necessidade', 
+    label: '2. DESCRIÇÃO DA NECESSIDADE DA CONTRATAÇÃO (JUSTIFICATIVA DA CONTRATAÇÃO)', 
+    icon: 'ClipboardList', 
+    section: 'II - DEMANDA E PROSPECÇÃO DE SOLUÇÕES', 
+    isAiEnabled: true, 
+    isEssential: true,
+    placeholder: 'Descreva o problema atual, não a solução.',
+    instruction: 'Foque no problema (ex: lentidão, falta de material) e no interesse público.',
+    helpText: 'A área demandante deve descrever a necessidade da compra/contratação, evidenciando o problema identificado e a real necessidade que ele gera, bem como o que se almeja alcançar com a contratação. (inciso I, art. 7º, IN 40/2020)\nÉ a identificação e caracterização do problema a ser resolvido. Justifica a decisão de contratar uma solução ou parte de uma solução, devendo responder a questões como:\n    • Qual é o problema que se pretende resolver?;\n    • Quais são os atores interessados na solução desse problema e quais as perspectivas desses atores sobre o problema?;\n    • Qual é o interesse público a ser atendido?;\n    • Quais os resultados e os benefícios que serão alcançados ao resolvê-lo?.\nÉ fundamental focar no problema, e não na solução. Por exemplo, o problema não é "precisamos de computadores", mas sim "a lentidão dos equipamentos atuais está atrasando o atendimento ao cidadão".'
+  },
+  { 
+    id: 'levantamento_mercado', 
+    label: '3. LEVANTAMENTO DE MERCADO E ANÁLISE DAS ALTERNATIVAS POSSÍVEIS', 
+    icon: 'BarChart', 
+    section: 'II - DEMANDA E PROSPECÇÃO DE SOLUÇÕES', 
+    isAiEnabled: true,
+    helpText: 'Consiste em realizar pesquisa de mercado, a fim de identificar as soluções disponíveis que atendam à necessidade da contratação e aos requisitos estabelecidos, bem como conhecer as condições usuais de aquisição ou de execução do objeto. Essa pesquisa possibilita identificar o que o mercado tem a oferecer para atender à necessidade da Administração, e ter uma noção dos custos envolvidos, comparando o custo-benefício de cada tipo de solução cogitado para a resolução do problema.\nÉ importante considerar se a solução em análise criaria outros problemas ou gargalos para a Administração e se esses gargalos gerados seriam problemas maiores que o problema a ser resolvido, tendo em vista que cada solução a contratar pode expor a organização pública a riscos novos e implica gastos, inclusive com manutenção da solução ao longo do tempo.\nNão se trata apenas de pesquisar preços, mas de analisar modelos de contratação, tecnologias e abordagens distintas. É como pesquisar diferentes modelos de carro antes de decidir qual comprar – um pode ser mais barato na aquisição, outro mais econômico a longo prazo, e um terceiro pode ter a tecnologia exata que você precisa. Este estudo evita que a Administração contrate uma solução ultrapassada, ineficiente ou com custo-benefício ruim.\n    • Deve-se utilizar fontes de pesquisa diversificadas, incluindo:\nConsulta direta a número razoável de potenciais fornecedores;\n    • Consulta junto a outras organizações públicas que tenham realizado contratações similares;\n    • Pesquisa publicada em mídia especializada e em sistemas oficiais de governo.\n Quando houver a possibilidade de compra ou de locação de bens, devem ser considerados os custos e os benefícios de cada opção, com indicação da alternativa mais vantajosa.\nPara o tipo de solução escolhido, caberá à área demandante demonstrar o atendimento aos requisitos estabelecidos, levando em conta razões técnicas e econômicas.\nNessa etapa, pode surgir a necessidade de reavaliar os requisitos da contratação, complementando-os, detalhando-os ou simplificando-os.\nO eventual não preenchimento deste campo deverá ser justificado (art. 18, §2º, parte final, da Lei nº 14.133/2021).'
+  },
+  { 
+    id: 'objeto_sucinto', 
+    label: '4. DESCRIÇÃO SUCINTA DO OBJETO', 
+    icon: 'Target', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true, 
+    isEssential: true,
+    placeholder: 'Ex: Aquisição de 50 notebooks para o setor administrativo',
+    instruction: 'Defina de forma concisa o objeto.',
+    helpText: 'Definir, de forma concisa, clara e precisa, o objeto que se pretende contratar, “incluídos sua natureza, os quantitativos, o prazo do contrato e, se for o caso, a possibilidade de sua prorrogação.\nA definição não deve contemplar especificações excessivas, desnecessárias ou irrelevantes, sob risco de frustrar ou limitar indevidamente o caráter competitivo da licitação, podendo até direcionar a licitação para fornecedor específico.\n\nIndicar se a contratação tem por objeto:\n    • Se é compra ou locação de bens ou prestação de serviço;\n    • Se será contínuo ou não contínuo;\n    • Se será entregue em parcela única ou indicar o prazo de vigência do contrato de 1 a 5 anos (5 ANOS se for serviço ou fornecimento CONTÍNUO), podendo ser prorrogado por até 10 anos (prorrogação por 10 ANOS se for serviço ou fornecimento CONTÍNUO);\n    • Se o objeto é comum ou especial;\n    • Se a adjudicação será por lotes ou por itens;\n    • No caso de prestação de serviços, se haverá dedicação exclusiva de mão de obra (DEMO) ou predominância de mão de obra;\n    • Se é com ou sem fornecimento de materiais e equipamentos.'
+  },
+  { 
+    id: 'especificacoes_tecnicas', 
+    label: 'ESPECIFICAÇÕES TÉCNICAS MÍNIMAS', 
+    icon: 'FileText', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true, 
+    isEssential: true,
+    placeholder: 'Descreva as características mínimas do que será contratado.',
+    instruction: 'Liste os requisitos técnicos básicos.',
+    helpText: 'Descreva as características mínimas do que será contratado, garantindo a qualidade e o desempenho necessários, sem restringir indevidamente a competição. As especificações devem ser claras e objetivas, utilizando normas técnicas reconhecidas sempre que possível. Devem contemplar requisitos de desempenho, durabilidade, segurança e sustentabilidade. É importante evitar marcas específicas, salvo se tecnicamente justificado, utilizando sempre a expressão "ou equivalente".'
+  },
+  { 
+    id: 'descricao_solucao_integral', 
+    label: '5. DESCRIÇÃO DA SOLUÇÃO COMO UM TODO', 
+    icon: 'Layout', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true,
+    helpText: 'Uma solução é o conjunto de todos os elementos (bens, serviços e outros) necessários para, de forma integrada, gerar os resultados que atendam à necessidade que ocasionou a contratação. Devem ser descritos todos os elementos a se produzir/contratar/executar para que a contratação produza, de fato, os resultados pretendidos pela Administração e atinja, de forma satisfatória, o escopo previamente eleito, com apresentação, quando for o caso, das justificativas técnicas e econômicas do tipo de solução escolhida.\nApós analisar as opções no "Levantamento de Mercado", aqui será descrito em detalhes a solução que foi escolhida. É como se, depois de pesquisar vários carros, você decidisse por um modelo específico e agora fosse descrever todas as suas características: o motor, os itens de série, o plano de revisões e até como ele será descartado no futuro.\nEsta descrição deve considerar todo o "ciclo de vida" do produto ou serviço: como ele será entregue ou instalado, como será sua manutenção, os custos durante o uso e como será seu descarte ou encerramento ao final do contrato.\nEm caso de exigências de qualificação técnica ou econômica:\n    • Necessitam ser específicas e objetivas;\n    • Devem ser justificadas neste tópico;\n    • Caso refiram-se a contratações para: a) entrega imediata, ou, b) contratações com valores inferiores a um quarto do limite para dispensa de licitação para compras em geral, é preciso justificar porque não foram dispensadas as exigências de qualificação técnica ou econômica.\nCaso após o levantamento de mercado a quantidade de fornecedores for considerada restrita, deve-se verificar se os requisitos que limitam a participação são realmente indispensáveis, flexibilizando-os sempre que possível.\nNo caso de serviços com contratação simultânea para o mesmo objeto, caso a Administração pretenda contratar mais de uma empresa para execução do objeto, é necessário atestar ainda que:\n    • Não houve perda da economia de escala;\n    • É possível e conveniente a execução simultânea;\n    • Há controle individualizado para execução de cada contratado (conforme art. 49 da Lei nº 14.133/2021).\nO eventual não preenchimento deste campo deverá ser justificado (art. 18, §2º, parte final da Lei nº 14.133/2021).'
+  },
+  { 
+    id: 'requisitos_header', 
+    label: '6. DESCRIÇÃO DOS REQUISITOS DA CONTRATAÇÃO', 
+    icon: 'ShieldCheck', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true,
+    placeholder: 'Campo informativo ou observações gerais sobre os requisitos.',
+    helpText: 'São os elementos necessários ao objeto a ser contratado, para que atenda adequadamente à necessidade que originou a contratação.\nSe a "Descrição da Necessidade" é o "problema", os "Requisitos da Contratação" são a "lista de regras e exigências mínimas" que a solução (seja um produto ou serviço) deve obrigatoriamente cumprir para ser considerada aceitável pela CMC. O objetivo é garantir a qualidade, o desempenho, a segurança e a padronização do que será contratado. É crucial que essas exigências sejam essenciais para atender à necessidade e não restrinjam indevidamente a competição a um único fornecedor.\nO eventual não preenchimento deste campo deverá ser justificado (art. 18, §2º, parte final da Lei nº 14.133/2021).'
+  },
+  { 
+    id: 'requisitos_exigencias', 
+    label: '6.1. Exigências Internas e Externas à CMC', 
+    icon: 'ShieldCheck', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true, 
+    helpText: 'Considerar as exigências internas da CMC que estejam relacionadas à execução do objeto, como, por exemplo, a segurança da informação, a proteção de dados pessoais, gestão documental, gestão de riscos.\nConsiderar as exigências externas à organização, como requisitos legais, infralegais e regulatórios, como, por exemplo, aderência a normas técnicas, de saúde e de segurança do trabalho.' 
+  },
+  { 
+    id: 'requisitos_qualidade', 
+    label: '6.2. Padrões de Qualidade Exigidos', 
+    icon: 'CheckCircle', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true, 
+    helpText: 'Definir os padrões de qualidade a serem exigidos na execução do objeto, os quais não devem exceder o necessário para atender à necessidade que originou a contratação.\nVale lembrar que as contratações que utilizarão o MENOR PREÇO como critério de julgamento também deverão estabelecer requisitos mínimos de qualidade.\nSe o ETP demonstrar que a avaliação e a ponderação da qualidade técnica das propostas que superarem os requisitos mínimos de qualidade são relevantes aos fins pretendidos pela Administração, poderá ser escolhido o critério de julgamento por TÉCNICA E PREÇO para a seleção do fornecedor nas contratações de objetos listados nos incisos I a V do § 1º do art. 36 da Lei nº 14.133/2021.' 
+  },
+  { 
+    id: 'requisitos_marca', 
+    label: '6.2.1. Marca de Referência', 
+    icon: 'Target', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true, 
+    helpText: 'Indicar quais são as marcas de referência dos respectivos itens, se for o caso, seguida das expressões “equivalente/similar ou de melhor qualidade”. Com fundamento no art. 41, I, “d” da Lei nº 14.133/2021, as marcas citadas são utilizadas unicamente como referência de qualidade para definir as características mínimas de desempenho e durabilidade desejadas. Tal indicação serve para facilitar a exata compreensão do objeto, sendo permitida a oferta de produtos de outras marcas, desde que possuam qualidade similar, equivalente ou superior, o que garante a ampla competitividade do certame.\n\nExcepcionalmente será permitida a indicação de uma ou mais marcas ou modelos, desde que justificada tecnicamente no processo, nas hipóteses descritas no art. 41, inciso I, alíneas a, b, c e d da Lei nº 14.133, de 2021.\nSimilaridade: Quando necessária a indicação de marca como referência de qualidade ou facilitação da descrição do objeto, ela deverá ser seguida das expressões “ou equivalente”, “ou similar” e “ou de melhor qualidade”, hipótese em que a Administração poderá exigir que o interessado comprove desempenho, qualidade e produtividade compatíveis com o produto similar ou equivalente à marca de referência mencionada, por meio dos procedimentos de prova de qualidade estabelecidos no art. 42 da Lei nº 14.133, de 2021.' 
+  },
+  { 
+    id: 'requisitos_continuos', 
+    label: '6.3. Caracterização de Serviços ou Fornecimentos Contínuos', 
+    icon: 'ClipboardList', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true, 
+    helpText: 'Determinar se o objeto em questão é de natureza contínua ou não. Serviços de natureza contínua são serviços auxiliares e necessários à Administração no desempenho das respectivas atribuições. São aqueles que, se interrompidos, podem comprometer a continuidade de atividades essenciais e cuja contratação deva estender-se por mais de um exercício financeiro.\nSão exemplos de serviços de natureza contínua: vigilância, limpeza e conservação, manutenção elétrica, manutenção de elevadores, manutenção de veículos etc.' 
+  },
+  { 
+    id: 'requisitos_amostra', 
+    label: '6.4. Exigência de Amostra ou Prova de Conceito (POC)', 
+    icon: 'Eye', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true, 
+    helpText: 'A Administração poderá solicitar do licitante provisoriamente vencedor a apresentação de amostras, a realização de exames de conformidade ou de provas de conceito, entre outros testes, para avaliar a conformidade do objeto ofertado com as especificações técnicas e requisitos de qualidade, de desempenho e de funcionalidade.\nO objetivo de tais exigências é evitar a contratação de objetos inadequados ou até mesmo inservíveis, que representariam prejuízos aos cofres públicos.\nComo têm o potencial de restringir o universo de participantes na licitação, tais medidas possuem caráter excepcional, devendo ser justificadas formalmente, a fim de demonstrar que são, de fato, imprescindíveis para avaliar a qualidade, o desempenho ou a funcionalidade do objeto ofertado. Ademais, ressalte-se, poderão ser exigidas somente do licitante provisoriamente vencedor.\nCaso o licitante melhor colocado não apresente a amostra ou essa seja reprovada, sua proposta deverá ser desclassificada, devendo a Administração analisar a aceitabilidade da proposta do segundo colocado, procedendo a avaliação das suas amostras.\nA Administração também poderá utilizar um protótipo como parâmetro para demonstrar o objeto que pretende adquirir. Nesse caso, as amostras exigidas do licitante melhor colocado serão comparadas com o protótipo, podendo ser examinadas por instituição especializada.\n    • Exigência de Amostra: descrever quais os itens que deverão ser apresentadas as amostras; descrever os critérios objetivos para aceitação da amostra; determinar o prazo para sua apresentação; informar qual o local de recebimento da amostra e qual área irá acompanhar o seu recebimento; qual o e-mail e telefone para agendamento da entrega das amostras; quantos dias de antecedência é necessário para agendar a entrega da amostra; entre outras informações importantes.\n    • Prova de Conceito (POC): é um teste prático, realizado após a classificação provisória do licitante, para validar se a solução técnica proposta atende às exigências para a contratação antes da assinatura do contrato. Descrever detalhadamente o roteiro de como será a POC, incluindo o horário e local para sua realização; determinar quais os requisitos a serem avaliados; qual a % mínima em cada requisito que a licitante deve atingir para ser aprovada; informar qual estrutura/itens será disponibilizado pela CMC e qual deverá ser disponibilizado pela licitante; determinar o prazo para sua apresentação; qual o e-mail e telefone para agendamento da POC; quantos dias de antecedência é necessário para agendar a realização da POC; entre outras informações importantes.' 
+  },
+  { 
+    id: 'requisitos_transicao', 
+    label: '6.5. Necessidade de transição contratual', 
+    icon: 'Zap', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true, 
+    helpText: 'Informar se há necessidade de transição contratual com transferência de conhecimento, tecnologia e técnicas empregadas, capacitação dos técnicos do contratante ou do novo contratado.' 
+  },
+  { 
+    id: 'garantia_contratual', 
+    label: '6.6.1. Garantia de Execução do Objeto (Garantia Contratual)', 
+    icon: 'ShieldCheck', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true, 
+    helpText: 'Indicar se é necessário a exigência de garantia para a execução do objeto. Em caso positivo, justifique a necessidade da exigência da garantia e indique qual o % da garantia em razão do valor inicial do contrato (5% para contratações em geral / 10% nos casos de alta complexidade técnica e riscos envolvidos, caso em que deverá haver justificativa específica nos autos).\nNão cabe à Administração definir qual será a forma de garantia, mas apenas o seu percentual. A forma da garantia é uma escolha do contratado, podendo ser prestada por uma das seguintes modalidades: caução em dinheiro ou em títulos da dívida pública; seguro-garantia; ou fiança bancária.\nA decisão de não exigir garantia da contratação também deverá ser acompanhada de uma justificativa técnica ou econômica explícita, a qual diminua a vulnerabilidade da Administração em caso de inexecução ou danos.' 
+  },
+  { 
+    id: 'garantia_tecnica', 
+    label: '6.6.2. Garantia Técnica (Garantia do Produto/Serviço)', 
+    icon: 'ShieldCheck', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true, 
+    helpText: 'Importante destacar que esta não se confunde com a Garantia de Execução do Objeto (Garantia Contratual). Enquanto a garantia técnica se refere à necessidade de garantia do produto e assistência técnica pelo fabricante/fornecedor, a garantia contratual consiste em um percentual do valor do contrato que servirá de “caução” para assegurar a prestação do serviço ou fornecimento do produto, conforme regras e percentuais dos arts. 96 a 102 da Lei nº 14.133/21.' 
+  },
+  { 
+    id: 'assistencia_tecnica', 
+    label: '6.6.3. Exigências de manutenção e assistência técnica', 
+    icon: 'Settings', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true, 
+    helpText: 'As exigências de manutenção e assistência devem contemplar a definição do local de realização dos serviços, se será admitida a exigência de deslocamento de técnico ao local ou se haverá a exigência de que o contratado tenha unidade de prestação de serviços em distância compatível com as necessidades da CMC.' 
+  },
+  { 
+    id: 'requisitos_vistoria', 
+    label: '6.7. Necessidade de Vistoria', 
+    icon: 'Eye', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true, 
+    helpText: 'Informar se haverá necessidade de realização de vistoria técnica; informar qual a diretoria/servidor que a empresa terá de contatar, e-mail, telefone e endereço.\nQuando a avaliação prévia do local de execução for imprescindível para o conhecimento pleno das condições e peculiaridades do objeto a ser contratado, o edital de licitação poderá prever, sob pena de inabilitação, a necessidade de o licitante atestar que conhece o local e as condições de realização da obra ou serviço, assegurado a ele o direito de realização de vistoria prévia.' 
+  },
+  { 
+    id: 'requisitos_subcontratacao', 
+    label: '6.8. Subcontratação', 
+    icon: 'Layout', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true, 
+    helpText: 'Informar se não será admitida a subcontratação do objeto contratual OU indicar o % mínimo e máximo do valor da contratação, informando quais as parcelas do objeto podem ser subcontratadas.\nNão exceder 25% de subcontratação para o objeto , conforme o Art. 122, inciso I, da Lei nº 14.133/2021.\nQualquer percentual ou parcela definida deve ser justificada técnica e economicamente no processo administrativo, demonstrando que a subcontratação é vantajosa e não restringe a competitividade.\nA subcontratação integral do objeto é vedada, alinhando-se à Lei nº 14.133/2021.\nDeixar claro que, mesmo com a autorização, a Contratada principal é a única responsável perante a Administração pela qualidade e integralidade dos serviços, e por quaisquer danos decorrentes da atuação da subcontratada.\nLei nº 14.133/2021: Art. 122: A Administração poderá prever no edital a possibilidade de subcontratação de partes ou de parcelas do objeto, desde que:\nI - não exceda o limite máximo de 25% (vinte e cinco por cento) do valor total do contrato;\nII - a subcontratada comprove os requisitos de habilitação;\nIII - a subcontratação seja justificada no processo de licitação;\nIV - o contratado mantenha a responsabilidade integral pela execução;\nV - a subcontratada seja aprovada pela Administração.\n(...)\n§ 2º: É vedada a subcontratação integral do objeto.' 
+  },
+  { 
+    id: 'requisitos_execucao', 
+    label: '6.9. Execução do Objeto', 
+    icon: 'Zap', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true, 
+    helpText: 'Consiste na definição de como o contrato deverá produzir os resultados pretendidos desde o seu início até o seu encerramento.\nDescrever a dinâmica do contrato, devendo ser observado, sempre que pertinente:\n    • Definição do prazo para início da execução do objeto, compatível com a necessidade, a natureza e a complexidade do objeto, atentando-se que o prazo mínimo previsto para início da prestação de serviços deverá ser o suficiente para possibilitar a preparação do prestador para o fiel cumprimento do contrato;\n    • Em caso de fornecimento, indicar qual o prazo para entrega PROVISÓRIA e DEFINITIVA do objeto; indicar qual o local e horário de entrega do objeto;\n    • . Em caso de serviço, indicar qual o prazo para iniciar o serviço;\n    • Descrição detalhada dos métodos, rotinas, tecnologias empregadas, procedimentos, frequência e periodicidade de execução do trabalho e das etapas a serem executadas;\n    • Indicar a forma de comunicação a ser utilizada para troca de informações entre a contratada e a administração;\n    • A localidade, o horário de funcionamento do órgão, dentre outros;\n    • A definição das rotinas da execução, a frequência e a periodicidade dos serviços, quando couber;\n    • Os procedimentos, metodologias e tecnologias a serem empregadas, quando for o caso;\n    • Os deveres e disciplina exigidos;\n    • O cronograma de realização dos serviços, incluídas todas as tarefas significativas e seus respectivos prazos;\n    • Demais especificações que se fizerem necessárias para a execução dos serviços.' 
+  },
+  { 
+    id: 'requisitos_dimensionamento', 
+    label: '6.10. Informações Importantes para o Dimensionamento da Proposta', 
+    icon: 'BarChart', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true, 
+    helpText: 'Informar detalhadamente sobre o ambiente e condições gerais de execução do objeto, como, por exemplo, se tem estrutura disponível, se tem alguma restrição de acesso, se alguma parcela do objeto ficará às expensas da contratada, entre outras informações.' 
+  },
+  { 
+    id: 'estimativa_quantidades_texto', 
+    label: '7. ESTIMATIVA DAS QUANTIDADES', 
+    icon: 'FileText', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true, 
+    isEssential: true,
+    placeholder: 'Ex: 50 unidades baseadas no número de servidores novos.',
+    instruction: 'Apresente a relação entre a demanda e o quantitativo.',
+    helpText: 'Deve ser apresentada a relação entre a demanda prevista e os quantitativos a serem contratados, com as respectivas memórias de cálculo acompanhadas dos documentos que lhes dão suporte. A estimativa deve ser obtida a partir de dados concretos, como, por exemplo, série histórica de consumo, atentando-se a eventual fato futuro apto a impactar o quantitativo demandado.\nNo caso de obras, as quantidades que devem ser levantadas em nível de ETP são aquelas que possibilitarão e nortearão a futura elaboração do projeto básico ou anteprojeto e, ao mesmo tempo, viabilizarão estimativas de custo.\nEm relação às compras, o planejamento deverá considerar a expectativa de consumo anual e determinar (art. 40, inciso III): (...) as unidades e quantidades a serem adquiridas em função de consumo e utilização prováveis, cuja estimativa será obtida, sempre que possível, mediante adequadas técnicas quantitativas, admitido o fornecimento contínuo.\nQuanto aos serviços, deverá ser demonstrada a relação entre a demanda prevista e a quantidade de serviço a ser contratada. A Administração deverá definir um método para quantificar os volumes de serviços demandados.'
+  },
+  { 
+    id: 'estimativa_valor_texto', 
+    label: '8. ESTIMATIVA DO VALOR DA CONTRATAÇÃO', 
+    icon: 'Zap', 
+    section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 
+    isAiEnabled: true, 
+    isEssential: true,
+    placeholder: 'Ex: R$ 250.000,00 baseado em pesquisa preliminar.',
+    instruction: 'Indique o valor global estimado para a solução.',
+    helpText: 'Para a comparação entre as diversas alternativas estudadas no ETP, a área demandante da contratação deve estimar o valor de cada solução.\nO objetivo dessa estimativa é apoiar a análise de viabilidade da contratação e avaliar a adequação das despesas futuras aos recursos disponíveis para a organização.\nNão é o objetivo principal, neste momento, definir o valor que constará do edital de licitação, mas sim possibilitar a escolha da solução mais vantajosa e o pronunciamento conclusivo sobre a viabilidade da contratação.\nApesar de ser um orçamento simplificado, para fins de análise de viabilidade econômica, é importante utilizar fontes diversificadas de pesquisa. Algumas fontes que podem ser usadas são:\n    • Contratações similares feitas pela Administração Pública;\n    • Dados de pesquisa publicada em mídia especializada;\n    • Tabelas de preços de referência fixados por órgão oficial;\n    • Sistemas oficiais de governo, como o catálogo eletrônico de padronização de compras, serviços e obras;\n    • Junto a fornecedores (essa é a fonte menos confiável de preços).\nAs memórias de cálculo dos preços unitários e do valor total devem ser incluídas, bem como os documentos que lhe dão suporte.\nAlém dos custos diretos para a obtenção da solução (preço de compra, entrega, instalação, seguros etc.), devem ser considerados, para a análise de viabilidade econômica, sempre que possível, os custos indiretos, relacionados ao ciclo de vida do objeto, a exemplo dos custos operacionais (como de consumo de energia, de combustível, de água, custos de peças de reposição e de manutenção, depreciação) e custos de fim de vida (desativação ou descarte final).'
+  },
+  { id: 'tabela_estimativa_quantitativos_precos', label: 'Tabela de Estimativa de Quantitativos e Preços', icon: 'Layout', section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', isAiEnabled: true, helpText: 'Apresente uma tabela detalhada com os itens, especificações, quantidades e preços estimados. A tabela deve permitir a clara identificação de cada item e a composição do valor total da contratação.' },
+  { id: 'justificativa_parcelamento', label: '9. JUSTIFICATIVAS PARA O PARCELAMENTO OU NÃO DA CONTRATAÇÃO (OBRIGATÓRIO - art. 18º, §2º, da Lei nº 14.133/2021)', icon: 'AlertTriangle', section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', isAiEnabled: true, helpText: 'A regra a ser observada pela Administração nas licitações é a do parcelamento do objeto, conforme disposto na alínea b do inciso V do art. 40 e art. 47, §1º, ambos da Lei nº 14.133/2021, mas é imprescindível que a divisão do objeto seja técnica e economicamente viável e não represente perda de economia de escala.\nA lei prioriza o parcelamento de contratações para aumentar a competição e obter melhores preços, permitindo a participação de mais empresas. A contratação não parcelada (em lote) deve ser justificada, como interligação de itens ou economia de escala. Não parcelar exige fundamentação.\nSe a solução for divisível, deve-se analisar a viabilidade técnica e a vantajosidade econômica do parcelamento para fins de contratação, e fundamentar a decisão no ETP.\n    • Havendo o parcelamento da solução, a licitação será realizada por item se o objeto for divisível e tal decisão.\n    • Havendo o não parcelamento da solução de objeto divisível, a licitação será realizada por lotes ou por lote único. A justificativa para o não parcelamento deve trazer elementos que demonstrem que haveria prejuízo ao conjunto ou à perda de economia de escala se adotada decisão em sentido contrário.\nExistem situações em que o parcelamento pode ser inviável ou desvantajoso. Por exemplo, quando há perda de economia de escala e a divisão em mais de um certame resulta em aumento dos custos globais da contratação. Outra situação é quando os benefícios do parcelamento não compensam o aumento do custo e das dificuldades administrativas da gestão contratual. Além disso, o parcelamento pode descaracterizar ou prejudicar o objeto da contratação, ou ser necessário contratar um fornecedor único para padronização. Especificamente para serviços, o parcelamento pode levar à perda da responsabilidade técnica devido à pluralidade de prestadores.' },
+  { id: 'resultados_pretendidos', label: '10. DEMONSTRATIVO DOS RESULTADOS PRETENDIDOS', icon: 'CheckCircle', section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', isAiEnabled: true, helpText: 'Responder de forma clara à pergunta: “O que nós ganhamos com essa contratação?". O objetivo é demonstrar os benefícios e as melhorias que a CMC espera alcançar. É a seção do "antes e depois": antes, tínhamos um problema; depois da contratação, esperamos ter estes resultados positivos.\nOs benefícios diretos e indiretos que o órgão almeja com a contratação podem ser em termos de economicidade, eficácia, eficiência, melhor aproveitamento de recursos humanos, materiais e financeiros disponíveis, inclusive com respeito a impactos ambientais positivos e melhoria da qualidade de produtos ou serviços oferecidos à sociedade.\nNo caso da contratação de serviços, poderá ser elaborado o Instrumento de Medição de Resultados (IMR) ou instrumento substituto, se for o caso, que deverá constar como anexo dos Estudos Preliminares (IN SEGES/MP nº 05/2017, Anexos V-B e VIII-A).\nO eventual não preenchimento deste campo deverá ser justificado (art. 18, §2º, parte final da Lei nº 14.133/2021).' },
+  { id: 'providencias_adm', label: '11. PROVIDÊNCIAS A SEREM ADOTADAS PELA ADMINISTRAÇÃO', icon: 'Settings', section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', isAiEnabled: true, helpText: 'Trata-se das medidas que a Administração precisa tomar para viabilizar a execução contratual. Essas medidas devem ser descritas no ETP, a fim de que sejam concluídas antes de iniciada a execução do contrato. Os custos das providências devem ser considerados na análise que determina a solução que será escolhida.\nAs providências podem contemplar mudanças relacionadas a:\n    • Infraestrutura tecnológica, como, por exemplo, aumento de processamento de dados;\n    • Infraestrutura elétrica, a exemplo do aumento de cabeamento ou substituição de disjuntores no quadro elétrico para suportar o funcionamento de novos equipamentos ou o aumento de potência exigida por maior número de usuários;\n    • Climatização de ambientes para alocação de equipamentos;\n    • Adequação de espaço físico para implantação da solução ou para que a equipe contratada opere dentro da organização;\n    • Fornecimento de materiais previstos para a execução contratual;\n    • Estrutura organizacional, podendo haver necessidade de modificar departamentos, extinguir alguns e/ou criar outros, bem como editar normativos internos;\n    • Processos de trabalho da organização, como os de segurança da informação, de segurança institucional, de gestão documental e de gestão de riscos. As mudanças devem ser claramente comunicadas e deve ser avaliada a necessidade de treinar os envolvidos nos processos;\n    • Adequação do consumo de materiais e serviços já prestados dentro da organização, como, por exemplo, limpeza, estacionamento, copa, restaurante, telefonia, água, café, manutenção predial;\n    • Obtenção de alvarás, licenças, outorgas, autorizações e outras exigências legais e infralegais;\n    • Capacitação de colaboradores da organização, inclusive para a gestão contratual; e de funcionários do contrato para a adaptação ao ambiente do órgão ou entidade.\nCaso seja necessária a adequação do ambiente da organização para que a contratação surta seus efeitos, cumpre elaborar cronograma com todas as atividades necessárias para tal e com indicação dos responsáveis por esses ajustes.\nEm havendo necessidade de ajustes, o cronograma deverá ser juntado ao processo e esta atuação prévia deve ser incluída no Mapa de Riscos como um fator de risco ao sucesso da contratação caso não seja implementada a tempo.\nO eventual não preenchimento deste campo deverá ser justificado (art. 18, §2º, parte final da Lei nº 14.133/2021).' },
+  { id: 'contratacoes_correlatas', label: '12. CONTRATAÇÕES CORRELATAS E/OU INTERDEPENDENTES', icon: 'Layout', section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', isAiEnabled: true, helpText: 'Identificar outras contratações que estão "amarradas" à que você está planejando. O objetivo é mapear o ecossistema da sua necessidade para evitar surpresas. Existem dois tipos: Interdependentes (essenciais para que a sua contratação principal funcione) e Correlatas (relacionadas, mas não essenciais).\nidentifica as contratações planejadas, em andamento ou já realizadas pela organização que possam impactar a solução escolhida ou serem por ela impactadas. Objetiva o tratamento integrado das contratações. Por exemplo, no levantamento de providências para ajuste de infraestrutura que a organização terá que fazer para implementar determinada solução, a área demandante poderá identificar contratações já realizadas ou planejadas que suprem esses ajustes.\nAs contratações correlatas tratam de objetos similares ou complementares aos que serão demandados pela nova solução. A análise deverá considerar, por exemplo, a possibilidade de agregar objetos semelhantes, com vistas à economia de escala ou à padronização; e a necessidade de substituir contratos vigentes prevendo período para a transição contratual.\nNo caso de serviços ou fornecimentos contínuos, é fundamental realizar uma transição contratual adequada para garantir a continuidade da prestação.\nAs contratações interdependentes são aquelas que são pré-requisitos para o sucesso da nova solução, ou contratações cujo sucesso depende da solução ora examinada. Para o outsourcing de impressão, por exemplo, será necessário o fornecimento de papel e de mobiliário para acomodação dos equipamentos e guarda de consumíveis; para o serviço de segurança patrimonial eletrônica, deverá haver o fornecimento de conexão à internet via cabo para as câmeras de vigilância e a aquisição e manutenção de aparelhos de ar-condicionado para os ambientes em que ficarão os servidores e demais equipamentos de armazenamento de dados de segurança patrimonial.\nO resultado da análise das contratações correlatas e/ou interdependentes pode influenciar não somente o quantitativo pretendido, como os requisitos técnicos e até a escolha da própria solução.\nO eventual não preenchimento deste campo deverá ser justificado (art. 18, §2º, parte final da Lei nº 14.133/2021).' },
+  { id: 'impactos_ambientais', label: '13. DESCRIÇÃO DE POSSÍVEIS IMPACTOS AMBIENTAIS E RESPECTIVAS MEDIDAS MITIGADORAS', icon: 'Leaf', section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', isAiEnabled: true, helpText: 'Indicar os possíveis impactos ambientais gerados pela contratação e as respectivas medidas de tratamento ou de mitigação para minimizá-los.\nO desenvolvimento nacional sustentável é um dos princípios a observar na aplicação da Lei 14.133/2021 e um dos objetivos do processo licitatório. Apresenta três dimensões principais: econômica, social e ambiental.\nA questão ambiental assume especial importância na elaboração do ETP, pois é nele que devem ser descritos os possíveis impactos ambientais do objeto a ser contratado, bem como as medidas que poderão ser tomadas para minimizá-los.\nA análise dos possíveis impactos ambientais deve considerar todo o ciclo de vida do objeto a ser contratado, pois uma solução inicialmente mais onerosa poderá mostrar-se mais vantajosa ao longo do tempo. Além disso, é importante considerar a logística reversa para a reciclagem e descarte adequado de bens e resíduos.\nPara obras e demais empreendimentos potencialmente poluidores do meio ambiente, as Resoluções - CONAMA 1/1986 e 237/1997 devem ser consultadas, pois dispõem, respectivamente, sobre critérios básicos e diretrizes gerais para a avaliação de impacto ambiental, trazendo, inclusive, o rol de empreendimentos cujo licenciamento ambiental é obrigatório, e procedimentos para o licenciamento ambiental.\nOs critérios de sustentabilidade deverão ser incluídos também nos requisitos da contratação. É importante que a área demandante pesquise se existem normativos que estabeleçam regras específicas de sustentabilidade para o objeto a ser contratado, evitando critérios genéricos.\nAssim, a análise dos possíveis impactos ambientais pode influenciar a escolha da solução contratada. A opção escolhida deve equilibrar as três dimensões da sustentabilidade - social, econômica e ambiental. Isso significa que os impactos ambientais devem ser comparados aos impactos sociais e aos custos das possíveis alternativas para se chegar a uma solução com maior equilíbrio entre essas três dimensões.\nO eventual não preenchimento deste campo deverá ser justificado (art. 18, §2º, parte final da Lei nº 14.133/2021).' },
+  { id: 'alinhamento_planejamento', label: '14. ALINHAMENTO ENTRE A CONTRATAÇÃO E O PLANEJAMENTO DA CÂMARA MUNICIPAL DE CURITIBA', icon: 'Target', section: 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', isAiEnabled: true, helpText: 'Demonstrar que a contratação que está sendo planejada não é um ato isolado ou de última hora, mas sim uma ação que foi previamente planejada e está de acordo com os objetivos maiores da CMC. O Plano de Contratações Anual (PCA) é, de forma simples, a "lista de compras e serviços" que a Câmara se programa para contratar durante o ano. Indicar que a sua demanda está no PCA prova que ela faz parte do planejamento. O alinhamento ao Planejamento Estratégico, por sua vez, mostra como essa contratação específica ajuda a CMC a alcançar suas metas de longo prazo.\nO eventual não preenchimento deste campo deverá ser justificado (art. 18, §2º, parte final da Lei nº 14.133/2021).' },
+  { id: 'posicionamento_conclusivo', label: '15. POSICIONAMENTO CONCLUSIVO SOBRE A ADEQUAÇÃO DA CONTRATAÇÃO PARA O ATENDIMENTO DA NECESSIDADE A QUE SE DESTINA (OBRIGATÓRIO - art. 18º, §2º, da Lei nº 14.133/2021)', icon: 'ShieldCheck', section: 'IV - POSICIONAMENTO CONCLUSIVO', isAiEnabled: true, helpText: 'A partir das informações levantadas no ETP, a área demandante conclui sobre a adequação da contratação para o atendimento da necessidade a que se destina, que inclui, de forma fundamentada, a avaliação se a contratação é ou não viável técnica e economicamente.\nDeve-se propor pelo prosseguimento ou pela desistência da contratação “antes que investimentos maiores sejam feitos”.\nAlém de verificar se todos os itens do ETP estão adequados e coerentes, a análise de viabilidade deve avaliar se:\n    • A necessidade da Administração é clara e pertinente, e a solução escolhida é a mais adequada para atendê-la;\n    • A contratação da solução ou de partes delas é necessária e oportuna;\n    • O objeto pode ser legalmente contratado;\n    • Os benefícios potenciais da contratação compensam os custos estimados para o contratante.\nSe a contratação for viável técnica e economicamente, a equipe de planejamento prosseguirá com as demais etapas de planejamento da contratação, elaborando o termo de referência (ou nortear o desenvolvimento ou contratação do projeto básico, ou anteprojeto), para subsequente elaboração do edital ou do instrumento de contratação direta.' },
+  { id: 'analise_riscos_resumo', label: '16. ANÁLISE DE RISCOS QUE POSSAM COMPROMETER O SUCESSO DA LICITAÇÃO (OBRIGATÓRIO - art. 18º, inc. X, da Lei nº 14.133/2021)', icon: 'AlertTriangle', section: 'V - GESTÃO DE RISCOS', isAiEnabled: true, helpText: 'Há riscos relevantes da contratação que precisarão ser registrados durante o processo de planejamento e gerenciados ao longo dos processos de seleção do fornecedor e de gestão do contrato.\nEsses riscos podem estar relacionados ao processo licitatório (ou ao processo de contratação direta), às providências a serem adotadas pela Administração antes da celebração do contrato, à gestão do futuro contrato, ou aos resultados pretendidos com a contratação.\nAssim, a gestão de riscos da contratação poderá ser formalizada por um MAPA DE RISCOS.\nIdentificada a melhor solução a ser contratada, deve-se retirá-la do ambiente abstrato, que somente enxerga as condições ideais de execução, e identificar quais circunstâncias supervenientes podem prejudicar o desenvolvimento da licitação e o alcance dos fins pretendidos com a contratação.\nEssas ocorrências, que poderão ser de natureza institucional, de mercado, ambiente físico, econômicas, entre outras, são chamadas de riscos, e devem ser identificadas com base tanto na experiência acumulada pela Administração, no desempenho da sua atividade contratual, como também em normas técnicas ou outros documentos que, eventualmente, se ocupem de identificar riscos no segmento de mercado em que se insere a contratação.\nPortanto, para cada risco, define-se a probabilidade dos possíveis e potenciais danos ao erário\nTrata-se, em última análise, de uma oportunidade para a Administração – sobretudo tendo em vista os registros históricos de suas licitações e contratações – se antecipar a ocorrência de problemas que possam frustrar os objetivos da licitação e da contratação e definir ações de prevenção e contingenciamento para assegurar os resultados mínimos para sua atuação.\nFrisa-se que o MAPA DE RISCOS não deve ser confundido com a MATRIZ DE RISCOS prevista na Lei 14.133/2021, pois tal matriz é uma cláusula contratual que tem por objetivo alocar às partes (contratante e contratada) as responsabilidades pelos riscos relacionados a eventos supervenientes à contratação.\nO eventual não preenchimento deste campo deverá ser justificado (art. 18, §2º, parte final da Lei nº 14.133/2021).' },
+  { id: 'tabela_riscos_interna', label: 'Anexo I - Riscos Fase Interna', icon: 'Layout', section: 'V - GESTÃO DE RISCOS', isAiEnabled: true, helpText: 'Tabela detalhada dos riscos identificados na fase interna do processo, incluindo descrição, impacto, probabilidade e medidas de mitigação.' },
+  { id: 'tabela_riscos_externa', label: 'Anexo I - Riscos Fase Externa', icon: 'Layout', section: 'V - GESTÃO DE RISCOS', isAiEnabled: true, helpText: 'Tabela detalhada dos riscos identificados na fase externa do processo, incluindo descrição, impacto, probabilidade e medidas de mitigação.' },
+  { id: 'fotos', label: 'Fotos e Ilustrações do Objeto', icon: 'Eye', section: 'VI - ANEXOS FOTOGRÁFICOS', isAiEnabled: false, helpText: 'Anexe fotos ou ilustrações que ajudem a identificar e descrever o objeto da contratação. As imagens devem ser nítidas e acompanhadas de legendas explicativas.' },
+  { 
+    id: 'data_documento', 
+    label: 'Data do Documento', 
+    icon: 'BarChart', 
+    section: 'VII - ASSINATURAS', 
+    isAiEnabled: false, 
+    isEssential: true,
+    placeholder: 'Ex: 17 de abril de 2026'
+  },
+  { 
+    id: 'assinaturas', 
+    label: 'Assinaturas (NOME, Lotação - uma por linha)', 
+    icon: 'Edit3', 
+    section: 'VII - ASSINATURAS', 
+    isAiEnabled: false, 
+    isEssential: true,
+    placeholder: 'Maria Santos, Diretoria de Patrimônio e Serviços\nJoão Silva, Seção Administrativa e Financeira',
+    helpText: 'Insira o nome e a lotação dos responsáveis pela elaboração do ETP, um por linha. As assinaturas devem ser colhidas após a finalização do documento.'
+  },
+];
+
+const getMillis = (val: any): number => {
+  if (!val) return 0;
+  if (typeof val.toMillis === 'function') return val.toMillis();
+  if (typeof val.toDate === 'function') return val.toDate().getTime();
+  if (val instanceof Date) return val.getTime();
+  if (typeof val.seconds === 'number') return val.seconds * 1000;
+  if (typeof val === 'number') return val;
+  if (typeof val === 'string') {
+    const parsed = Date.parse(val);
+    return isNaN(parsed) ? 0 : parsed;
+  }
+  return 0;
+};
+
+const getSafeDateString = (timestamp: any): string => {
+  if (!timestamp) return '';
+  if (typeof timestamp.toDate === 'function') {
+    return timestamp.toDate().toLocaleDateString('pt-BR');
+  }
+  if (timestamp instanceof Date) {
+    return timestamp.toLocaleDateString('pt-BR');
+  }
+  if (typeof timestamp === 'number') {
+    return new Date(timestamp).toLocaleDateString('pt-BR');
+  }
+  if (typeof timestamp === 'string') {
+    const parsed = Date.parse(timestamp);
+    if (!isNaN(parsed)) {
+      return new Date(parsed).toLocaleDateString('pt-BR');
+    }
+    return timestamp;
+  }
+  return '';
+};
+
+const getSafeTimeString = (timestamp: any): string => {
+  if (!timestamp) return '';
+  if (typeof timestamp.toDate === 'function') {
+    return timestamp.toDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  }
+  if (timestamp instanceof Date) {
+    return timestamp.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  }
+  if (typeof timestamp === 'number') {
+    return new Date(timestamp).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  }
+  if (typeof timestamp === 'string') {
+    const parsed = Date.parse(timestamp);
+    if (!isNaN(parsed)) {
+      return new Date(parsed).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    }
+  }
+  return '';
+};
+
+const IconMap: Record<string, any> = {
+  FileText, ClipboardList, Target, CheckCircle, Sparkles, Loader2, Printer, 
+  Layout, BarChart, ShieldCheck, Leaf, Settings, Zap, Wand2, Eye, Edit3, 
+  AlertTriangle, ChevronDown, ChevronUp, Download, Info, Trash2, PlusCircle,
+  ImagePlus, X, LogOut, FileDown, Users, RefreshCcw
+};
+
+const Icon = ({ name, size = 16, className = "" }: { name: string, size?: number, className?: string }) => {
+  const LucideIcon = IconMap[name];
+  if (!LucideIcon) return null;
+  return <LucideIcon size={size} className={className} />;
+};
+
+const compressImage = (file: File, maxWidth = 800, maxHeight = 800, quality = 0.65): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = (event) => {
+      const img = new Image();
+      img.src = event.target?.result as string;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+
+        if (width > height) {
+          if (width > maxWidth) {
+            height = Math.round((height * maxWidth) / width);
+            width = maxWidth;
+          }
+        } else {
+          if (height > maxHeight) {
+            width = Math.round((width * maxHeight) / height);
+            height = maxHeight;
+          }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(event.target?.result as string);
+          return;
+        }
+
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = (err) => reject(err);
+    };
+    reader.onerror = (err) => reject(err);
+  });
+};
+
+const FileUploader = ({ value, onChange, readOnly = false }: { value: string, onChange: (value: string) => void, readOnly?: boolean }) => {
+  const [images, setImages] = useState<string[]>([]);
+  const [isCompresing, setIsCompressing] = useState(false);
+
+  useEffect(() => {
+    if (value) {
+      try {
+        setImages(JSON.parse(value));
+      } catch (e) {
+        setImages([]);
+      }
+    } else {
+      setImages([]);
+    }
+  }, [value]);
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+
+    setIsCompressing(true);
+    try {
+      const compressionPromises = Array.from(files).map(file => compressImage(file));
+      const compressedBase64s = await Promise.all(compressionPromises);
+      
+      const newImages = [...images, ...compressedBase64s].slice(0, 8);
+      setImages(newImages);
+      onChange(JSON.stringify(newImages));
+    } catch (err) {
+      console.error("Erro ao comprimir imagens:", err);
+    } finally {
+      setIsCompressing(false);
+    }
+  };
+
+  const removeImage = (index: number) => {
+    const newImages = images.filter((_, i) => i !== index);
+    setImages(newImages);
+    onChange(JSON.stringify(newImages));
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap gap-4">
+        {images.map((img, index) => (
+          <div key={index} className="relative w-32 h-32 rounded-xl overflow-hidden border border-slate-200 group">
+            <img src={img} alt={`Upload ${index}`} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+            {!readOnly && (
+              <button
+                onClick={() => removeImage(index)}
+                className="absolute top-1 right-1 p-1 bg-red-600 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+              >
+                <Icon name="X" size={12} />
+              </button>
+            )}
+          </div>
+        ))}
+        {!readOnly && (
+          <label className="w-32 h-32 rounded-xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center cursor-pointer hover:border-indigo-400 hover:bg-indigo-50 transition-all text-slate-400 hover:text-indigo-600">
+            {isCompresing ? (
+              <Loader2 size={24} className="animate-spin text-indigo-600" />
+            ) : (
+              <Icon name="ImagePlus" size={24} />
+            )}
+            <span className="text-[10px] font-bold mt-2 uppercase">
+              {isCompresing ? "Processando..." : "Adicionar Foto"}
+            </span>
+            <input type="file" className="hidden" accept="image/*" multiple onChange={handleFileChange} disabled={isCompresing} />
+          </label>
+        )}
+      </div>
+      {!readOnly && (
+        <p className="text-[10px] text-slate-400 italic">
+          As fotos são comprimidas de forma inteligente para economizar espaço de armazenamento. Máximo 8 imagens por ETP.
+        </p>
+      )}
+    </div>
+  );
+};
+
+const TABLE_TEMPLATES = {
+  quantitativos: `
+    <table style="border-collapse:collapse;width:100%;border:1px solid #000">
+      <thead>
+        <tr style="background-color:#e2e8f0"><th style="border:1px solid #000;padding:8px;text-align:center">Item</th><th style="border:1px solid #000;padding:8px;text-align:center">Descrição</th><th style="border:1px solid #000;padding:8px;text-align:center">Quantidade</th><th style="border:1px solid #000;padding:8px;text-align:center">Valor Unitário</th><th style="border:1px solid #000;padding:8px;text-align:center">Valor Total</th></tr>
+      </thead>
+      <tbody>
+        <!-- Gerar linhas aqui -->
+      </tbody>
+      <tfoot>
+        <tr style="background-color:#e2e8f0;font-weight:bold"><td colspan="4" style="border:1px solid #000;padding:8px;text-align:center uppercase">TOTAL ESTIMADO</td><td style="border:1px solid #000;padding:8px;text-align:center">R$ [Soma Total]</td></tr>
+      </tfoot>
+    </table>
+  `,
+  riscos: (fase: 'INTERNA' | 'EXTERNA') => `
+    <table style="border-collapse:collapse;width:100%;border:1px solid #000">
+      <thead>
+        <tr style="background-color:#e2e8f0"><th style="border:1px solid #000;padding:8px;text-align:right;width:15%">FASE:</th><th colspan="4" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">${fase}</th></tr>
+        <tr style="background-color:#e2e8f0"><th colspan="5" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">Riscos referente a fase de análise escolhida:</th></tr>
+      </thead>
+      <tbody>
+        <!-- Para cada risco, gerar este bloco -->
+        <tr style="background-color:#f1f5f9"><th colspan="5" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">RISCO [N]</th></tr>
+        <tr><td style="border:1px solid #000;padding:8px;font-weight:bold;width:20%">Situação de Risco:</td><td colspan="4" style="border:1px solid #000;padding:8px">[Descrever Risco]</td></tr>
+        <tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Probabilidade:</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Baixa</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Média</td><td colspan="2" style="border:1px solid #000;padding:8px;text-align:center">( ) Alta</td></tr>
+        <tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Impacto:</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Baixo</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Médio</td><td colspan="2" style="border:1px solid #000;padding:8px;text-align:center">( ) Alto</td></tr>
+        <tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Plano de Mitigação:</td><td colspan="4" style="border:1px solid #000;padding:8px">[Descrever Mitigação]</td></tr>
+      </tbody>
+    </table>
+  `
+};
+
+const INITIAL_STATE: ETPData = {
+  etp_name: 'Novo Estudo (VIABILIZA)',
+  diag_problema_necessidade: '', diag_alternativas_solucao: '', diag_objeto_vigencia: '', diag_exigencias_padroes: '',
+  diag_quantidades_valor: '', diag_parcelamento_providencias: '', diag_correlatas_ambientais: '', diag_riscos_sucesso: '',
+  processo_spae: '', unidade_requisitante: '', responsavel: '',
+  justificativa_necessidade: '', levantamento_mercado: '',
+  objeto_sucinto: '', especificacoes_tecnicas: '', requisitos_header: '', descricao_solucao_integral: '',
+  requisitos_exigencias: '', requisitos_qualidade: '', requisitos_marca: '', requisitos_continuos: '',
+  requisitos_amostra: '', requisitos_transicao: '',
+  garantia_contratual: '', garantia_tecnica: '', assistencia_tecnica: '',
+  requisitos_vistoria: '', requisitos_subcontratacao: '', requisitos_execucao: '', requisitos_dimensionamento: '',
+  estimativa_quantidades_texto: '', estimativa_valor_texto: '',
+  tabela_estimativa_quantitativos_precos: '<table style="border-collapse:collapse;width:100%;border:1px solid #000"><thead><tr style="background-color:#e2e8f0"><th style="border:1px solid #000;padding:8px;text-align:center">Item</th><th style="border:1px solid #000;padding:8px;text-align:center">Descrição</th><th style="border:1px solid #000;padding:8px;text-align:center">Quantidade</th><th style="border:1px solid #000;padding:8px;text-align:center">Valor Unitário</th><th style="border:1px solid #000;padding:8px;text-align:center">Valor Total</th></tr></thead><tbody><tr><td style="border:1px solid #000;padding:8px;text-align:center">1</td><td style="border:1px solid #000;padding:8px">&nbsp;</td><td style="border:1px solid #000;padding:8px">&nbsp;</td><td style="border:1px solid #000;padding:8px">&nbsp;</td><td style="border:1px solid #000;padding:8px">&nbsp;</td></tr><tr><td style="border:1px solid #000;padding:8px;text-align:center">2</td><td style="border:1px solid #000;padding:8px">&nbsp;</td><td style="border:1px solid #000;padding:8px">&nbsp;</td><td style="border:1px solid #000;padding:8px">&nbsp;</td><td style="border:1px solid #000;padding:8px">&nbsp;</td></tr><tr style="background-color:#e2e8f0;font-weight:bold"><td colspan="4" style="border:1px solid #000;padding:8px;text-align:center uppercase">TOTAL ESTIMADO</td><td style="border:1px solid #000;padding:8px;text-align:center">R$ 0,00</td></tr></tbody></table>',
+  justificativa_parcelamento: '', resultados_pretendidos: '',
+  providencias_adm: '', contratacoes_correlatas: '', impactos_ambientais: '',
+  alinhamento_planejamento: '', posicionamento_conclusivo: '',
+  analise_riscos_resumo: '', 
+  tabela_riscos_interna: '<table style="border-collapse:collapse;width:100%;border:1px solid #000"><thead><tr style="background-color:#e2e8f0"><th style="border:1px solid #000;padding:8px;text-align:right;width:15%">FASE:</th><th colspan="4" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">INTERNA</th></tr><tr style="background-color:#e2e8f0"><th colspan="5" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">Riscos referente a fase de análise escolhida:</th></tr></thead><tbody><tr style="background-color:#f1f5f9"><th colspan="5" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">RISCO 1</th></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold;width:20%">Situação de Risco:</td><td colspan="4" style="border:1px solid #000;padding:8px">Atrasos na contratação decorrentes de atraso na tramitação do processo administrativo. <strong>[EXEMPLO]</strong></td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Probabilidade:</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Baixa</td><td style="border:1px solid #000;padding:8px;text-align:center">( x ) Média</td><td colspan="2" style="border:1px solid #000;padding:8px;text-align:center">( ) Alta</td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Impacto:</td><td style="border:1px solid #000;padding:8px;text-align:center">( x ) Baixo</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Médio</td><td colspan="2" style="border:1px solid #000;padding:8px;text-align:center">( ) Alto</td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Plano de Mitigação:</td><td colspan="4" style="border:1px solid #000;padding:8px">Acompanhamento do processo e apoio às áreas envolvidas. <strong>[EXEMPLO]</strong></td></tr><tr style="background-color:#f1f5f9"><th colspan="5" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">RISCO 2</th></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Situação de Risco:</td><td colspan="4" style="border:1px solid #000;padding:8px">Equívocos nos quantitativos estimados. <strong>[EXEMPLO]</strong></td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Probabilidade:</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Baixa</td><td style="border:1px solid #000;padding:8px;text-align:center">( x ) Média</td><td colspan="2" style="border:1px solid #000;padding:8px;text-align:center">( ) Alta</td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Impacto:</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Baixo</td><td style="border:1px solid #000;padding:8px;text-align:center">( x ) Médio</td><td colspan="2" style="border:1px solid #000;padding:8px;text-align:center">( ) Alto</td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Plano de Mitigação:</td><td colspan="4" style="border:1px solid #000;padding:8px">A área demandante deve prever o quantitativo dos itens tomando como base o consumo histórico dos anos anteriores, bem como seu planejamento futuro. <strong>[EXEMPLO]</strong></td></tr><tr><td colspan="5" style="border:1px solid #000;padding:8px;text-align:center">(...)</td></tr></tbody></table>', 
+  tabela_riscos_externa: '<table style="border-collapse:collapse;width:100%;border:1px solid #000"><thead><tr style="background-color:#e2e8f0"><th style="border:1px solid #000;padding:8px;text-align:right;width:15%">FASE:</th><th colspan="4" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">EXTERNA</th></tr><tr style="background-color:#e2e8f0"><th colspan="5" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">Riscos referente a fase de análise escolhida:</th></tr></thead><tbody><tr style="background-color:#f1f5f9"><th colspan="5" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">RISCO 1</th></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold;width:20%">Situação de Risco:</td><td colspan="4" style="border:1px solid #000;padding:8px">Ausência de empresas que atendam aos requisitos da contratação. <strong>[EXEMPLO]</strong></td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Probabilidade:</td><td style="border:1px solid #000;padding:8px;text-align:center">( x ) Baixa</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Média</td><td colspan="2" style="border:1px solid #000;padding:8px;text-align:center">( ) Alta</td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Impacto:</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Baixo</td><td style="border:1px solid #000;padding:8px;text-align:center">( x ) Médio</td><td colspan="2" style="border:1px solid #000;padding:8px;text-align:center">( ) Alto</td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Plano de Mitigação:</td><td colspan="4" style="border:1px solid #000;padding:8px">Ampla pesquisa preliminar, pela Diretoria de Contratações, sobre as empresas disponíveis no mercado e confirmação junto às empresas se elas atendem aos requisitos da contratação. <strong>[EXEMPLO]</strong></td></tr><tr style="background-color:#f1f5f9"><th colspan="5" style="border:1px solid #000;padding:8px;text-align:center;font-weight:bold">RISCO 2</th></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Situação de Risco:</td><td colspan="4" style="border:1px solid #000;padding:8px">Impugnação e recursos no percurso do processo licitatório, ocasionando atrasos. <strong>[EXEMPLO]</strong></td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Probabilidade:</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Baixa</td><td style="border:1px solid #000;padding:8px;text-align:center">( x ) Médio</td><td colspan="2" style="border:1px solid #000;padding:8px;text-align:center">( ) Alta</td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Impacto:</td><td style="border:1px solid #000;padding:8px;text-align:center">( ) Baixo</td><td style="border:1px solid #000;padding:8px;text-align:center">( x ) Médio</td><td colspan="2" style="border:1px solid #000;padding:8px;text-align:center">( ) Alto</td></tr><tr><td style="border:1px solid #000;padding:8px;font-weight:bold">Plano de Mitigação:</td><td colspan="4" style="border:1px solid #000;padding:8px">Elaboração do termo de referência e edital da licitação com equipe das áreas de Planejamento, Contratações, Contratos e Jurídica e com participação ativa da área requisitante, subsidiando as demais com informações relevantes para o delineamento do objeto e eventuais esclarecimentos. <strong>[EXEMPLO]</strong></td></tr><tr><td colspan="5" style="border:1px solid #000;padding:8px;text-align:center">(...)</td></tr></tbody></table>',
+  include_riscos_interna: false,
+  include_riscos_externa: false,
+  fotos: '',
+  data_documento: new Date().toISOString().split('T')[0],
+  assinaturas: '',
+  status: 'in_progress',
+  _version: 2,
+};
+
+const INITIAL_DFD_STATE: DFDData = {
+  dfd_name: 'Novo DFD (VIABILIZA)',
+  diag_area_requisitante: '',
+  diag_dispensa_etp: '',
+  diag_justificativa_necessidade: '',
+  diag_descricao_solucao: '',
+  diag_estimativa_quantidades: '',
+  diag_estimativa_valor: '',
+  diag_requisitos_tecnicos: '',
+  diag_cronograma_prioridade: '',
+  status: 'in_progress',
+  _version: 1,
+};
+
+const base64ToUint8Array = (base64: string) => {
+  const binaryString = window.atob(base64.split(',')[1]);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+};
+
+const formatDateLong = (isoDate: string) => {
+  if (!isoDate) return '____ de ____________ de 202_.';
+  try {
+    const [year, month, day] = isoDate.split('-');
+    const date = new Date(Number(year), Number(month) - 1, Number(day));
+    return date.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
+  } catch (e) {
+    return isoDate;
+  }
+};
+
+export default function App() {
+  useEffect(() => {
+    const handleError = (e: ErrorEvent) => {
+      console.error("Global Error Caught:", e.error);
+      setApiError(`Erro fatal no sistema: ${e.message || 'Erro desconhecido'}`);
+    };
+    window.addEventListener('error', handleError);
+    return () => window.removeEventListener('error', handleError);
+  }, []);
+
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [userRole, setUserRole] = useState<'user' | 'master'>('user');
+  const [userStatus, setUserStatus] = useState<'pending' | 'approved' | 'disabled'>('pending');
+  const [hasAcceptedTerms, setHasAcceptedTerms] = useState<boolean>(false);
+  const [showWelcomePopup, setShowWelcomePopup] = useState(false);
+  const [welcomeCheckbox, setWelcomeCheckbox] = useState(false);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [drafts, setDrafts] = useState<any[]>([]);
+  const [allUsers, setAllUsers] = useState<any[]>([]);
+  const [trashDrafts, setTrashDrafts] = useState<any[]>([]);
+  const [currentDraftId, setCurrentDraftId] = useState<string | null>(null);
+  const lastSavedDataRef = useRef<string>('');
+  const [view, setView] = useState<'dashboard' | 'editor' | 'admin' | 'about'>('dashboard');
+  const [adminTab, setAdminTab] = useState<'etps' | 'users' | 'trash' | 'settings'>('users');
+  const [systemSettings, setSystemSettings] = useState<{ chatWebhookUrl?: string, geminiApiKey?: string }>({});
+  const [agencyConfig, setAgencyConfig] = useState<{ name: string; logoUrl: string }>({
+    name: localStorage.getItem('agency_name') || 'Câmara Municipal de Curitiba',
+    logoUrl: localStorage.getItem('agency_logo') || ''
+  });
+
+  useEffect(() => {
+    getDoc(doc(db, 'settings', 'agency')).then(snap => {
+      if (snap.exists()) {
+        const data = snap.data();
+        if (data.name) {
+          setAgencyConfig({ name: data.name, logoUrl: data.logoUrl || '' });
+          localStorage.setItem('agency_name', data.name);
+          if (data.logoUrl) localStorage.setItem('agency_logo', data.logoUrl);
+        }
+      }
+    }).catch(e => {});
+  }, []);
+
+  const saveAgencyConfig = (name: string, logoUrl: string) => {
+    setAgencyConfig({ name, logoUrl });
+    localStorage.setItem('agency_name', name);
+    localStorage.setItem('agency_logo', logoUrl);
+    setDoc(doc(db, 'settings', 'agency'), { name, logoUrl, updatedAt: serverTimestamp() }, { merge: true }).catch(e => console.warn(e));
+    setApiError("Configurações do órgão salvas com sucesso!");
+    setTimeout(() => setApiError(null), 3000);
+  };
+  
+  const [formData, setFormData] = useState<ETPData>(INITIAL_STATE);
+  const [isGenerating, setIsGenerating] = useState<ETPField | 'global' | null>(null);
+  const [viewMode, setViewMode] = useState<'edit' | 'preview'>('edit');
+  const [apiError, setApiError] = useState<string | null>(null);
+  const [quotaExceeded, setQuotaExceeded] = useState<boolean>(false);
+
+  useEffect(() => {
+    const handleQuotaError = (e: any) => {
+      console.error("Quota Exceeded Event Caught:", e.detail);
+      setQuotaExceeded(true);
+    };
+    window.addEventListener('firestore-quota-exceeded', handleQuotaError);
+    return () => window.removeEventListener('firestore-quota-exceeded', handleQuotaError);
+  }, []);
+
+  // Initialize local Gemini API key from storage on mount (helpful for static GitHub Pages)
+  useEffect(() => {
+    try {
+      const localKey = localStorage.getItem('gemini_api_key');
+      if (localKey && localKey.trim().length > 10) {
+        setSystemSettings(prev => ({ ...prev, geminiApiKey: localKey.trim() }));
+      }
+    } catch (e) {}
+  }, []);
+
+  const getClientGeminiApiKey = (key?: string) => {
+    return key && key.trim().length > 10 ? key.trim() : undefined;
+  };
+
+  const getGeminiApiKey = (): string => {
+    const resolved = getClientGeminiApiKey(systemSettings?.geminiApiKey);
+    if (resolved) {
+      return resolved;
+    }
+
+    let processKey = undefined;
+    try {
+      processKey = typeof process !== 'undefined' ? process.env?.GEMINI_API_KEY : undefined;
+    } catch (e) {
+      // safe fallback if process is not defined
+    }
+    if (processKey && processKey.trim().length > 10) {
+      return processKey.trim();
+    }
+
+    throw new Error(
+      "Chave de API do Gemini não configurada! Para utilizar as funções de IA na versão estática (GitHub Pages), um usuário Master deve entrar no Painel Master > Configurações e salvar a Chave de API do Gemini da organização (ou preencher VITE_GEMINI_API_KEY)."
+    );
+  };
+
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [showGlobalConfirm, setShowGlobalConfirm] = useState(false);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [userToDelete, setUserToDelete] = useState<any | null>(null);
+  const [confirmDeleteCheckbox, setConfirmDeleteCheckbox] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [examplePopup, setExamplePopup] = useState<{ fieldId: string, examples: ETPExample[] } | null>(null);
+  const [helpPopup, setHelpPopup] = useState<{ title: string, content: string } | null>(null);
+  const [aiPopup, setAiPopup] = useState<{ fieldId: ETPField, content: string } | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [activeTab, setActiveTab] = useState<'diagnostic' | 'technical'>('diagnostic');
+  const [expandedSections, setExpandedSections] = useState<string[]>(['0. DIAGNÓSTICO INICIAL', 'I - INFORMAÇÕES GERAIS', 'II - DEMANDA E PROSPECÇÃO DE SOLUÇÕES', 'III - DESCRIÇÃO DA SOLUÇÃO ESCOLHIDA', 'IV - ANÁLISE DE RISCOS E CONCLUSÃO']);
+  const [isSavingExit, setIsSavingExit] = useState(false);
+  const [isAdminViewing, setIsAdminViewing] = useState(false);
+  const [importProgress, setImportProgress] = useState<{ current: number, total: number, type: 'ETPs' | 'Usuários' } | null>(null);
+  const [backupToImport, setBackupToImport] = useState<any | null>(null);
+  const [debugUserEmail, setDebugUserEmail] = useState('');
+  const [debugUserInfo, setDebugUserInfo] = useState<any | null>(null);
+  const [isDebugSearching, setIsDebugSearching] = useState(false);
+  const [etpSort, setEtpSort] = useState<{ key: string, direction: 'asc' | 'desc' }>({ key: 'updatedAt', direction: 'desc' });
+  const [userSort, setUserSort] = useState<{ key: string, direction: 'asc' | 'desc' }>({ key: 'displayName', direction: 'asc' });
+  const [userSearch, setUserSearch] = useState('');
+  const [reassignState, setReassignState] = useState<{ draftId: string, currentEmail: string, title: string } | null>(null);
+  const [showImportDocModal, setShowImportDocModal] = useState(false);
+  const [pastedDocText, setPastedDocText] = useState('');
+  const [isExtractingDoc, setIsExtractingDoc] = useState(false);
+  const [extractError, setExtractError] = useState<string | null>(null);
+  const [isHoveredDocBtn, setIsHoveredDocBtn] = useState(false);
+
+  const isReadOnly = isAdminViewing || formData?.status === 'completed';
+
+  const sortedDrafts = useMemo(() => {
+    // Deduplicate by ID
+    const uniqueDrafts = Array.from(new Map(drafts.map(d => [d.id, d])).values());
+    
+    const sorted = uniqueDrafts.sort((a, b) => {
+      let aValue = a[etpSort.key];
+      let bValue = b[etpSort.key];
+
+      // Handle Firebase Timestamps
+      if (aValue?.toDate) aValue = aValue.toDate().getTime();
+      if (bValue?.toDate) bValue = bValue.toDate().getTime();
+
+      if (aValue < bValue) return etpSort.direction === 'asc' ? -1 : 1;
+      if (aValue > bValue) return etpSort.direction === 'asc' ? 1 : -1;
+      return 0;
+    });
+    return sorted;
+  }, [drafts, etpSort]);
+
+  const sortedUsers = useMemo(() => {
+    // Deduplicate by email first to handle potential duplicate documents from edge cases
+    const emailMap = new Map();
+    allUsers.forEach(u => {
+      const email = (u.email || '').toLowerCase();
+      // If duplicate, keep the one with 'approved' status if possible, otherwise keep the most recent
+      if (!emailMap.has(email)) {
+        emailMap.set(email, u);
+      } else {
+        const existing = emailMap.get(email);
+        if (u.status === 'approved' && existing.status !== 'approved') {
+          emailMap.set(email, u);
+        } else if (getMillis(u.lastActive) > getMillis(existing.lastActive)) {
+          emailMap.set(email, u);
+        }
+      }
+    });
+
+    const uniqueUsers = Array.from(emailMap.values());
+    
+    // Apply search filter
+    const filtered = uniqueUsers.filter(u => {
+      const search = userSearch.toLowerCase();
+      if (!search) return true;
+      const dName = (u.displayName || '').toLowerCase();
+      const uEmail = (u.email || '').toLowerCase();
+      const uId = (u.uid || u.id || '').toLowerCase();
+      return dName.includes(search) || uEmail.includes(search) || uId.includes(search);
+    });
+
+    const sorted = filtered.sort((a, b) => {
+      let aValue = a[userSort.key] || '';
+      let bValue = b[userSort.key] || '';
+
+      if (aValue < bValue) return userSort.direction === 'asc' ? -1 : 1;
+      if (aValue > bValue) return userSort.direction === 'asc' ? 1 : -1;
+      return 0;
+    });
+    return sorted;
+  }, [allUsers, userSort, userSearch]);
+
+  const sortedTrash = useMemo(() => {
+    // Deduplicate by ID
+    const uniqueTrash = Array.from(new Map(trashDrafts.map(d => [d.id, d])).values());
+    
+    const sorted = uniqueTrash.sort((a, b) => {
+      let aValue = a[etpSort.key];
+      let bValue = b[etpSort.key];
+
+      // Handle Firebase Timestamps
+      if (aValue?.toDate) aValue = aValue.toDate().getTime();
+      if (bValue?.toDate) bValue = bValue.toDate().getTime();
+
+      if (aValue < bValue) return etpSort.direction === 'asc' ? -1 : 1;
+      if (aValue > bValue) return etpSort.direction === 'asc' ? 1 : -1;
+      return 0;
+    });
+    return sorted;
+  }, [trashDrafts, etpSort]);
+
+  const toggleEtpSort = (key: string) => {
+    setEtpSort(prev => ({
+      key,
+      direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc'
+    }));
+  };
+
+  const toggleUserSort = (key: string) => {
+    setUserSort(prev => ({
+      key,
+      direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc'
+    }));
+  };
+
+  const toggleSection = (section: string) => {
+    setExpandedSections(prev => 
+      prev.includes(section) ? prev.filter(s => s !== section) : [...prev, section]
+    );
+  };
+
+  // Auth Listener
+  useEffect(() => {
+    // Fallback timer: Se o Firebase demorar demais, tenta liberar o loading para mostrar o login
+    const fallbackTimer = setTimeout(() => {
+      if (!isAuthReady) {
+        console.warn("[Auth] Timeout de inicialização - forçando liberação do loading");
+        setIsAuthReady(true);
+      }
+    }, 8000);
+
+    const unsubscribe = onAuthStateChanged(auth, async (u) => {
+      // Clear roles/status immediately to avoid UI flickering/leakage from previous user
+      setUserRole('user');
+      setUserStatus('pending');
+      setHasAcceptedTerms(false);
+      setAllUsers([]);
+      setDrafts([]);
+      
+      if (u) {
+        setUser(u);
+        const cleanEmail = (u.email || '').toLowerCase().trim();
+        console.log(`[Auth] Usuário logado: ${cleanEmail} (UID: ${u.uid})`);
+        
+        try {
+          const isDefaultMaster = cleanEmail === "diego.martins@cmc.pr.gov.br";
+
+          if (isDefaultMaster) {
+            setUserRole('master');
+            setUserStatus('approved');
+            console.log("[Auth] Master verificado por e-mail (Bypass offline).");
+          }
+
+          // Priority 1: Check if document exists with current UID
+          const userRef = doc(db, 'users', u.uid);
+          console.log(`[Auth] Verificando existência do doc para UID: ${u.uid}`);
+          
+          let userSnap;
+          try {
+            // Promise with timeout for better UX
+            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("unreachable")), 8000));
+            userSnap = await Promise.race([getDoc(userRef), timeoutPromise]) as any;
+          } catch (fetchErr: any) {
+            console.warn("[Auth] Erro ao buscar perfil (talvez offline):", fetchErr.message);
+            // If we are offline but have a master email, we allow it. Otherwise, we might need to wait or show a message.
+            if (isDefaultMaster) {
+              userSnap = { exists: () => false }; // Fallback to new user logic which sets master/approved anyway
+            } else {
+              throw fetchErr; // Re-throw to be caught by the outer block if we really can't proceed
+            }
+          }
+
+          // Priority 2: If not found by UID, check if document exists with same email
+          if (!userSnap.exists()) {
+            console.log(`[Auth] Doc não encontrado por UID. Buscando por e-mail: ${cleanEmail}`);
+            const usersRef = collection(db, 'users');
+            const q = query(usersRef, where('email', '==', cleanEmail), limit(1));
+            
+            let querySnap;
+            try {
+              const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("unreachable")), 8000));
+              querySnap = await Promise.race([getDocs(q), timeoutPromise]) as any;
+            } catch (qErr) {
+              console.warn("[Auth] Error na busca por e-mail (offline?):", qErr);
+              querySnap = { empty: true };
+            }
+
+            if (querySnap && !querySnap.empty) {
+              const existingDoc = querySnap.docs[0];
+              console.log(`[Auth] Doc encontrado por e-mail (ID original: ${existingDoc.id}). Consolidando...`);
+              const existingData = existingDoc.data();
+
+              // Do not await to avoid hanging
+              setDoc(userRef, {
+                ...existingData,
+                uid: u.uid,
+                email: cleanEmail,
+                lastActive: serverTimestamp(),
+                _consolidatedFrom: existingDoc.id
+              }).then(() => {
+                if (existingDoc.id !== u.uid) {
+                  deleteDoc(existingDoc.ref).catch(e => console.warn(e.message));
+                }
+              }).catch(e => console.warn("Erro ao consolidar docs por email", e.message));
+              
+              // We simulate the snapshot for the next if block
+              const simulatedData = { ...existingData, uid: u.uid, email: cleanEmail };
+              userSnap = { exists: () => true, data: () => simulatedData } as any;
+            }
+          }
+
+          if (userSnap.exists()) {
+            console.log(`[Auth] Carregando perfil existente...`);
+            const data = userSnap.data();
+            const finalRole = isDefaultMaster ? 'master' : (data.role || 'user');
+            const finalStatus = isDefaultMaster ? 'approved' : (data.status || 'pending');
+
+            setUserRole(finalRole);
+            setUserStatus(finalStatus);
+            setHasAcceptedTerms(!!data.hasAcceptedTerms);
+
+            if (finalStatus === 'approved' && !data.hasAcceptedTerms) {
+              setShowWelcomePopup(true);
+            }
+
+            // DO NOT await this so that hitting write quota does not block auth flow
+            updateDoc(userRef, {
+              lastActive: serverTimestamp(),
+              displayName: u.displayName || data.displayName || '',
+              email: cleanEmail
+            }).catch(e => console.warn("Erro ao atualizar presença na inicialização (provavelmente offline):", e.message));
+          } else {
+            console.log(`[Auth] Criando NOVO perfil para: ${cleanEmail}`);
+            const role = isDefaultMaster ? 'master' : 'user';
+            const status = isDefaultMaster ? 'approved' : 'pending';
+
+            const newUserData = {
+              uid: u.uid,
+              email: cleanEmail,
+              displayName: u.displayName || '',
+              role: role,
+              status: status,
+              hasAcceptedTerms: false,
+              createdAt: serverTimestamp(),
+              lastActive: serverTimestamp()
+            };
+
+            setUserRole(role);
+            setUserStatus(status);
+            setHasAcceptedTerms(false);
+
+            // DO NOT await this so that hitting write quota doesn not block auth flow
+            setDoc(userRef, newUserData)
+              .then(() => {
+                console.log(`[Auth] Novo perfil criado com sucesso! Status: ${status}`);
+                if (status === 'pending') {
+                  notify.registration(cleanEmail, u.displayName || 'Usuário').catch(e => console.warn("Erro ao enviar notificação de registro:", e.message));
+                }
+              })
+              .catch(e => console.warn("Erro ao criar perfil. O usuário continua logado na sessão local.", e.message));
+          }
+        } catch (err: any) {
+          if (err.message === "unreachable" || err.message?.includes("client is offline")) {
+            console.warn("[Auth] Operando em modo de conectividade limitada.");
+            // If it's a known email, we've already set the basics.
+            // If not, we let the user stay in "pending" status locally.
+          } else {
+            console.error("[Auth Error] Erro crítico na inicialização:", err);
+            const detail = err.message || JSON.stringify(err);
+            setApiError(`Erro ao inicializar dados do usuário: ${detail.substring(0, 100)}...`);
+          }
+        }
+      } else {
+        setUser(null);
+        setUserRole('user');
+        setUserStatus('pending');
+        setHasAcceptedTerms(false);
+        setDrafts([]);
+        setAllUsers([]);
+        setTrashDrafts([]);
+      }
+      setIsAuthReady(true);
+      clearTimeout(fallbackTimer);
+    });
+    return () => {
+      unsubscribe();
+      clearTimeout(fallbackTimer);
+    };
+  }, []);
+
+  // Master check also considers the default master email
+  const isMaster = userRole === 'master' || user?.email === "diego.martins@cmc.pr.gov.br";
+
+  // User Profile Sync (Updates role/status in real-time)
+  useEffect(() => {
+    if (!user || !isAuthReady) return;
+    if (user.uid === 'demo-user-12345') return;
+
+    const unsubscribe = onSnapshot(doc(db, 'users', user.uid), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        const cleanEmail = (user.email || '').toLowerCase().trim();
+        const isDefaultMaster = cleanEmail === "diego.martins@cmc.pr.gov.br";
+        
+        setUserRole(isDefaultMaster ? 'master' : (data.role || 'user'));
+        setUserStatus(isDefaultMaster ? 'approved' : (data.status || 'pending'));
+        setHasAcceptedTerms(!!data.hasAcceptedTerms);
+      } else {
+        // Doc deleted, reset to pending
+        const cleanEmail = (user.email || '').toLowerCase().trim();
+        const isDefaultMaster = cleanEmail === "diego.martins@cmc.pr.gov.br";
+        if (!isDefaultMaster) {
+          setUserRole('user');
+          setUserStatus('pending');
+        }
+      }
+    }, (err) => {
+      console.warn("User profile sync error:", err);
+    });
+
+    return unsubscribe;
+  }, [user?.uid, isAuthReady]);
+
+  // Users Listener (Master only)
+  useEffect(() => {
+    if (user?.uid === 'demo-user-12345') {
+      setAllUsers([{ uid: 'demo-user-12345', email: user.email, displayName: user.displayName, role: 'master', status: 'approved' }]);
+      return;
+    }
+    if (isMaster && userStatus === 'approved' && isAuthReady) {
+      const unsubscribe = onSnapshot(collection(db, 'users'), (snapshot) => {
+        setAllUsers(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      }, (error) => {
+        console.warn("Users listener permission error:", error);
+      });
+      return unsubscribe;
+    }
+  }, [isMaster, userStatus, isAuthReady]);
+
+  // Trash Listener (Master only)
+  useEffect(() => {
+    if (user?.uid === 'demo-user-12345') {
+      setTrashDrafts([]);
+      return;
+    }
+    if (isMaster && userStatus === 'approved' && isAuthReady) {
+      const q = query(
+        collection(db, 'etps'), 
+        where('status', '==', 'deleted'),
+        orderBy('updatedAt', 'desc')
+      );
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        const now = Date.now();
+        const trash = snapshot.docs.map(doc => {
+          const data = doc.data();
+          const deletedAtDoc = data.deletedAt;
+          
+          // Robust check for deletedAt timestamp
+          if (!deletedAtDoc || typeof deletedAtDoc.toDate !== 'function') {
+            return { id: doc.id, ...data, isExpired: false };
+          }
+          
+          const deletedAt = deletedAtDoc.toDate().getTime();
+          const isExpired = now - deletedAt > 72 * 60 * 60 * 1000;
+          return { id: doc.id, ...data, isExpired };
+        });
+        
+        // Auto-clean expired trash - only if we have a valid deletedAt
+        trash.filter(t => t.isExpired && (t as any).deletedAt).forEach(t => {
+          deleteDoc(doc(db, 'etps', t.id));
+        });
+
+        setTrashDrafts(trash.filter(t => !t.isExpired));
+      }, (error) => {
+        console.warn("Trash listener permission error (expected during login):", error);
+      });
+      return unsubscribe;
+    }
+  }, [isMaster, userStatus, isAuthReady]);
+
+  // Drafts Listener
+  useEffect(() => {
+    if (!user || userStatus !== 'approved' || !isAuthReady) {
+      setDrafts([]);
+      return;
+    }
+
+    if (user.uid === 'demo-user-12345') {
+      try {
+        const localDrafts = JSON.parse(localStorage.getItem('demo_etps') || '[]');
+        setDrafts(localDrafts.filter((d: any) => d.status !== 'deleted'));
+      } catch (e) {
+        setDrafts([]);
+      }
+      return;
+    }
+
+    let q;
+    if (isMaster && view === 'admin') {
+      q = query(collection(db, 'etps'), orderBy('updatedAt', 'desc'), limit(100));
+    } else {
+      q = query(
+        collection(db, 'etps'), 
+        where('userId', '==', user.uid), 
+        orderBy('updatedAt', 'desc'),
+        limit(100)
+      );
+    }
+
+    return onSnapshot(q, (snapshot) => {
+      const d = snapshot.docs
+        .map(doc => ({ id: doc.id, ...doc.data() }))
+        .filter((doc: any) => doc.status !== 'deleted');
+      setDrafts(d);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'etps');
+    });
+  }, [user, isMaster, userStatus, view, isAuthReady]);
+
+  const pendingUsersCount = sortedUsers.filter(u => u.status === 'pending').length;
+
+  // System Settings Listener
+  useEffect(() => {
+    if (user && isAuthReady) {
+      if (user.uid === 'demo-user-12345') return;
+      const unsubscribe = onSnapshot(doc(db, 'config', 'system'), (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          setSystemSettings(data);
+          if (data?.geminiApiKey && typeof data.geminiApiKey === 'string' && data.geminiApiKey.trim().length > 10) {
+            try {
+              localStorage.setItem('gemini_api_key', data.geminiApiKey.trim());
+            } catch (e) {}
+          }
+        }
+      });
+      return unsubscribe;
+    }
+  }, [user, isAuthReady]);
+
+  const updateSystemSettings = async (newSettings: any) => {
+    try {
+      if (newSettings?.geminiApiKey && typeof newSettings.geminiApiKey === 'string') {
+        try {
+          localStorage.setItem('gemini_api_key', newSettings.geminiApiKey.trim());
+        } catch (e) {}
+      }
+      await setDoc(doc(db, 'config', 'system'), newSettings, { merge: true });
+      setApiError("Configurações atualizadas com sucesso!");
+      setTimeout(() => setApiError(null), 3000);
+    } catch (err: any) {
+      if (newSettings?.geminiApiKey && typeof newSettings.geminiApiKey === 'string') {
+        try {
+          localStorage.setItem('gemini_api_key', newSettings.geminiApiKey.trim());
+          setApiError("Chave de API salva localmente neste navegador com sucesso!");
+          setTimeout(() => setApiError(null), 3000);
+          return;
+        } catch (e) {}
+      }
+      handleFirestoreError(err, OperationType.WRITE, 'config/system');
+    }
+  };
+
+  const notify = {
+    registration: async (email: string, name: string) => {
+      let url = systemSettings.chatWebhookUrl;
+      if (!url) {
+        const snap = await getDoc(doc(db, 'config', 'system'));
+        if (snap.exists()) url = snap.data().chatWebhookUrl;
+      }
+      return notifyNewUserRegistration(email, name, url);
+    },
+    approved: async (email: string, name: string) => {
+      let url = systemSettings.chatWebhookUrl;
+      if (!url) {
+        const snap = await getDoc(doc(db, 'config', 'system'));
+        if (snap.exists()) url = snap.data().chatWebhookUrl;
+      }
+      return notifyUserApproved(email, name, url);
+    },
+    created: async (email: string, title: string) => {
+      let url = systemSettings.chatWebhookUrl;
+      if (!url) {
+        const snap = await getDoc(doc(db, 'config', 'system'));
+        if (snap.exists()) url = snap.data().chatWebhookUrl;
+      }
+      return notifyNewETPCreated(email, title, url);
+    },
+    test: async () => {
+      let url = systemSettings.chatWebhookUrl;
+      if (!url) {
+        const snap = await getDoc(doc(db, 'config', 'system'));
+        if (snap.exists()) url = snap.data().chatWebhookUrl;
+      }
+      return sendGoogleChatNotification("🔔 *Teste de Notificação*\n\nO sistema de notificações do ETP Digital está operando corretamente!", url);
+    }
+  };
+
+  const handleLogin = async (e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    if (isLoggingIn) return;
+    setIsLoggingIn(true);
+    setApiError(null);
+    try {
+      // Explicitly using browserPopupRedirectResolver helps with "Pending promise was never set" error
+      // in certain environments like iframes or restricted browsers.
+      await signInWithPopup(auth, googleProvider, browserPopupRedirectResolver);
+    } catch (err: any) {
+      console.error("Login error:", err);
+      // Ignore "auth/cancelled-popup-request" which happens if user clicks again or closes popup
+      if (err.code !== 'auth/cancelled-popup-request' && err.code !== 'auth/popup-closed-by-user') {
+        setApiError("Erro ao fazer login: " + (err.code || err.message));
+      }
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleDemoLogin = () => {
+    const demoUser = {
+      uid: 'demo-user-12345',
+      email: 'diego.martins@cmc.pr.gov.br',
+      displayName: 'Diego Martins (Demo Master)',
+      photoURL: ''
+    } as any;
+    setUser(demoUser);
+    setUserRole('master');
+    setUserStatus('approved');
+    setHasAcceptedTerms(true);
+    setIsAuthReady(true);
+    setApiError(null);
+  };
+
+  const handleLogout = async () => {
+    await signOut(auth);
+    setView('dashboard');
+    setCurrentDraftId(null);
+    setFormData(INITIAL_STATE);
+    setIsAdminViewing(false);
+  };
+
+  const saveDraft = async (manual = false) => {
+    if (!user || !formData || isAdminViewing) return;
+    
+    const currentDataStr = JSON.stringify(formData);
+    // Para save automático, não salvar se não houve real mudança.
+    if (!manual && currentDataStr === lastSavedDataRef.current) {
+      return; 
+    }
+    
+    setIsSaving(true);
+    try {
+      const draftData = {
+        userId: user.uid,
+        userEmail: user.email,
+        title: formData.etp_name || "ETP sem título",
+        data: formData,
+        status: formData.status || 'in_progress',
+        updatedAt: serverTimestamp()
+      };
+
+      // Check document size before saving to prevent Firestore write error.
+      // Firestore document size limit is exactly 1,048,576 bytes (1MB).
+      const tempDraftData = { ...draftData, updatedAt: new Date().toISOString() };
+      const estimatedSize = new Blob([JSON.stringify(tempDraftData)]).size;
+      const MAX_SIZE = 1048576; // 1MB
+      
+      if (estimatedSize > MAX_SIZE) {
+        setApiError(`Aviso de Limite de Espaço: O tamanho do estudo (${(estimatedSize / 1024 / 1024).toFixed(2)} MB) excede o limite máximo permitido de 1.00 MB. Remova algumas fotos anexadas ou remova imagens de alta resolução coladas nos campos de texto para que possamos salvar o rascunho com sucesso.`);
+        setIsSaving(false);
+        return;
+      }
+
+      if (user.uid === 'demo-user-12345') {
+        const localDrafts = JSON.parse(localStorage.getItem('demo_etps') || '[]');
+        const newId = currentDraftId || 'demo-etp-' + Date.now();
+        const index = localDrafts.findIndex((d: any) => d.id === newId);
+        const itemToSave = { 
+          id: newId, 
+          ...draftData, 
+          updatedAt: { toDate: () => new Date() } 
+        };
+        if (index >= 0) {
+          localDrafts[index] = itemToSave;
+        } else {
+          localDrafts.unshift(itemToSave);
+        }
+        localStorage.setItem('demo_etps', JSON.stringify(localDrafts));
+        setCurrentDraftId(newId);
+        setDrafts(localDrafts.filter((d: any) => d.status !== 'deleted'));
+        lastSavedDataRef.current = currentDataStr;
+        setIsSaving(false);
+        setApiError(null);
+        return;
+      }
+
+      if (currentDraftId) {
+        await updateDoc(doc(db, 'etps', currentDraftId), draftData);
+      } else {
+        const docRef = await addDoc(collection(db, 'etps'), {
+          ...draftData,
+          createdAt: serverTimestamp()
+        });
+        setCurrentDraftId(docRef.id);
+        
+        // Notify about new ETP
+        notify.created(user.email || 'Usuário', draftData.title).catch(e => console.warn("Erro ao enviar notificação de novo ETP:", e.message));
+      }
+      
+      lastSavedDataRef.current = currentDataStr;
+      setApiError(null); // Clear errors upon successful save
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.WRITE, 'etps');
+      const errStr = String(err?.message || err).toLowerCase();
+      if (errStr.includes('exceeds the maximum allowed size') || errStr.includes('too large') || errStr.includes('limit')) {
+        setApiError("Ocorreu um erro ao salvar: O tamanho do estudo excede o limite do banco de dados (1MB). Reduza o tamanho ou quantidade das imagens inseridas.");
+      } else {
+        setApiError(`Erro ao salvar rascunho: ${err?.message || 'Verifique sua conexão ou permissões.'}`);
+      }
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleExitEditor = async () => {
+    if (!isAdminViewing) {
+      setIsSavingExit(true); // Popup starts
+      const startTime = Date.now();
+      await saveDraft(true);
+      const elapsedTime = Date.now() - startTime;
+      const remainingTime = Math.max(0, 3000 - elapsedTime);
+      
+      setTimeout(() => {
+        setIsSavingExit(false);
+        setView('dashboard');
+      }, remainingTime);
+    } else {
+      setView('admin');
+      setIsAdminViewing(false);
+    }
+  };
+
+  // Auto-save
+  useEffect(() => {
+    if (!user || view !== 'editor') return;
+    const timer = setTimeout(() => {
+      saveDraft();
+    }, 180000); // 3 minutos
+    return () => clearTimeout(timer);
+  }, [formData, user, view]);
+
+  const loadDraft = (draft: any, adminView = false) => {
+    if (draft && draft.data) {
+      let data = { ...draft.data };
+      if (!data._version || data._version < 2) {
+        if (data.requisitos_continuos === undefined) {
+          data.requisitos_continuos = '';
+        }
+        data._version = 2;
+      }
+      setFormData(data);
+      lastSavedDataRef.current = JSON.stringify(data);
+      setCurrentDraftId(draft.id);
+      setIsAdminViewing(adminView);
+      setView('editor');
+    } else {
+      setFormData(INITIAL_STATE);
+      lastSavedDataRef.current = JSON.stringify(INITIAL_STATE);
+      setCurrentDraftId(null);
+      setIsAdminViewing(adminView);
+      setView('editor');
+    }
+    setShowAdvanced(false);
+  };
+
+  const createNewETP = () => {
+    setFormData(INITIAL_STATE);
+    lastSavedDataRef.current = JSON.stringify(INITIAL_STATE);
+    setCurrentDraftId(null);
+    setIsAdminViewing(false);
+    setView('editor');
+    setShowAdvanced(false);
+  };
+
+
+  const deleteDraft = async (id: string) => {
+    if (user?.uid === 'demo-user-12345') {
+      try {
+        const localDrafts = JSON.parse(localStorage.getItem('demo_etps') || '[]');
+        const updated = localDrafts.filter((d: any) => d.id !== id);
+        localStorage.setItem('demo_etps', JSON.stringify(updated));
+        setDrafts(updated.filter((d: any) => d.status !== 'deleted'));
+        if (currentDraftId === id) {
+          setFormData(INITIAL_STATE);
+          setCurrentDraftId(null);
+          setView('dashboard');
+        }
+        setDeleteConfirmId(null);
+      } catch (e) {}
+      return;
+    }
+    try {
+      // Optimistic update
+      setDrafts(prev => prev.filter(d => d.id !== id));
+      
+      await updateDoc(doc(db, 'etps', id), { 
+        status: 'deleted',
+        deletedAt: serverTimestamp()
+      });
+      if (currentDraftId === id) {
+        setFormData(INITIAL_STATE);
+        setCurrentDraftId(null);
+        setView('dashboard');
+      }
+      setDeleteConfirmId(null);
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, 'etps');
+    }
+  };
+
+  const restoreDraft = async (id: string) => {
+    try {
+      await updateDoc(doc(db, 'etps', id), { 
+        status: 'in_progress',
+        deletedAt: null,
+        updatedAt: serverTimestamp()
+      });
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, 'etps');
+    }
+  };
+
+  const permanentDeleteDraft = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, 'etps', id));
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.DELETE, 'etps');
+    }
+  };
+
+  const toggleETPStatus = async (draftId: string, currentStatus: string) => {
+    const newStatus = currentStatus === 'completed' ? 'in_progress' : 'completed';
+    try {
+      // Find the draft locally first to get current data
+      const draft = drafts.find(d => d.id === draftId);
+      if (!draft) return;
+
+      const updatedData = { ...draft.data, status: newStatus };
+
+      await updateDoc(doc(db, 'etps', draftId), {
+        'data.status': newStatus,
+        data: updatedData,
+        status: newStatus,
+        updatedAt: serverTimestamp()
+      });
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, 'etps');
+    }
+  };
+
+  const migrateEtpStatusToInProgress = async () => {
+    if (!isMaster) return;
+    setIsSaving(true);
+    setApiError(null);
+    try {
+      const q = query(collection(db, 'etps'), where('status', '!=', 'completed'));
+      const snapshot = await getDocs(q);
+      let count = 0;
+      
+      for (const docSnap of snapshot.docs) {
+        const data = docSnap.data();
+        if (data.status !== 'deleted' && data.status !== 'in_progress') {
+          await updateDoc(docSnap.ref, { 
+            status: 'in_progress',
+            'data.status': 'in_progress',
+            updatedAt: serverTimestamp()
+          });
+          count++;
+        }
+      }
+      
+      console.log(`${count} ETPs migrados para 'in_progress'`);
+      setDrafts(prev => prev.map(d => {
+        if (d.status !== 'completed' && d.status !== 'deleted') {
+          return { ...d, status: 'in_progress' };
+        }
+        return d;
+      }));
+      // Simple feedback via console/state since alerts are restricted
+      setApiError(`Sucesso: ${count} rascunhos foram normalizados para 'Em Edição'.`);
+      setTimeout(() => setApiError(null), 5000);
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, 'etps');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const reassignDraft = async (draftId: string, newEmail: string) => {
+    if (!newEmail || !newEmail.includes('@')) {
+      setApiError("E-mail inválido.");
+      return;
+    }
+    setIsSaving(true);
+    try {
+      // Find user by email to get UID
+      const usersRef = collection(db, 'users');
+      const q = query(usersRef, where('email', '==', newEmail.trim().toLowerCase()), limit(1));
+      const querySnap = await getDocs(q);
+      
+      if (querySnap.empty) {
+        setApiError("Usuário não encontrado com este e-mail. O usuário precisa ter logado pelo menos uma vez no sistema.");
+        setIsSaving(false);
+        return;
+      }
+      
+      const newUid = querySnap.docs[0].id; // Use current document ID as UID
+      
+      // Update both userId and userEmail to match schema in saveDraft
+      await updateDoc(doc(db, 'etps', draftId), {
+        userId: newUid,
+        userEmail: newEmail.trim().toLowerCase()
+      });
+      
+      setReassignState(null);
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, 'etps');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const updateUserStatus = async (uid: string, newStatus: 'approved' | 'disabled' | 'pending') => {
+    try {
+      await updateDoc(doc(db, 'users', uid), { status: newStatus });
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, 'users');
+    }
+  };
+
+  const updateUserRole = async (uid: string, newRole: 'user' | 'master') => {
+    try {
+      await updateDoc(doc(db, 'users', uid), { role: newRole });
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, 'users');
+    }
+  };
+
+  const deleteUser = async (uid: string) => {
+    if (uid === user?.uid) {
+      setApiError("Você não pode excluir seu próprio usuário.");
+      return;
+    }
+    try {
+      await deleteDoc(doc(db, 'users', uid));
+      setUserToDelete(null);
+      setConfirmDeleteCheckbox(false);
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.DELETE, 'users');
+    }
+  };
+
+  const consolidateUsers = async () => {
+    if (userRole !== 'master') return;
+    setIsSaving(true);
+    setApiError(null);
+    try {
+      const usersSnap = await getDocs(collection(db, 'users'));
+      const allUsersData = usersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      
+      const emailGroups: Record<string, any[]> = {};
+      allUsersData.forEach((u: any) => {
+        const email = (u.email || '').toLowerCase();
+        if (!emailGroups[email]) emailGroups[email] = [];
+        emailGroups[email].push(u);
+      });
+
+      let updatedCount = 0;
+      for (const email in emailGroups) {
+        const group = emailGroups[email];
+        if (group.length > 1) {
+          // Find the best document to keep (approved > most recent active)
+          const best = group.sort((a, b) => {
+            if (a.status === 'approved' && b.status !== 'approved') return -1;
+            if (b.status === 'approved' && a.status !== 'approved') return 1;
+            return getMillis(b.lastActive) - getMillis(a.lastActive);
+          })[0];
+
+          // Merge data and delete others
+          for (const u of group) {
+            if (u.id !== best.id) {
+              await deleteDoc(doc(db, 'users', u.id));
+              updatedCount++;
+            }
+          }
+        }
+      }
+      setApiError(`Consolidação concluída. ${updatedCount} registros duplicados removidos.`);
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, 'users');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const debugLookupUser = async () => {
+    if (!debugUserEmail) return;
+    setIsDebugSearching(true);
+    setDebugUserInfo(null);
+    setApiError(null);
+    try {
+      const emailToSearch = debugUserEmail.toLowerCase().trim();
+      
+      // Attempt 1: Exact search
+      const qExact = query(collection(db, 'users'), where('email', '==', emailToSearch), limit(5));
+      const snapExact = await getDocs(qExact);
+      
+      // Attempt 2: Partial search (starts with) if exact fails
+      let snapPartial = null;
+      if (snapExact.empty) {
+        const qPartial = query(
+          collection(db, 'users'), 
+          where('email', '>=', emailToSearch), 
+          where('email', '<=', emailToSearch + '\uf8ff'),
+          limit(5)
+        );
+        snapPartial = await getDocs(qPartial);
+      }
+
+      const results = snapExact.empty ? (snapPartial?.docs || []) : snapExact.docs;
+
+      // Attempt 3: List ALL emails to see if there's a typo/encoding issue
+      const allSnap = await getDocs(collection(db, 'users'));
+      const allEmails = allSnap.docs.map(d => ({ 
+        email: d.data().email, 
+        id: d.id, 
+        status: d.data().status 
+      }));
+
+      if (results.length === 0) {
+        setDebugUserInfo({ 
+          notFound: true, 
+          email: debugUserEmail,
+          totalUsers: allSnap.size,
+          registeredEmails: allEmails.slice(0, 50) // Show a samples of emails
+        });
+      } else {
+        setDebugUserInfo({ 
+          found: true, 
+          docs: results.map(d => ({ id: d.id, ...d.data() })),
+          totalUsers: allSnap.size
+        });
+      }
+    } catch (err: any) {
+      setApiError("Erro na busca bruta: " + err.message);
+    } finally {
+      setIsDebugSearching(false);
+    }
+  };
+
+  const handleAcceptTerms = async () => {
+    if (!user || !welcomeCheckbox) return;
+    setIsSaving(true);
+    try {
+      const userRef = doc(db, 'users', user.uid);
+      await updateDoc(userRef, { 
+        hasAcceptedTerms: true,
+        acceptedTermsAt: serverTimestamp()
+      });
+      setHasAcceptedTerms(true);
+      setShowWelcomePopup(false);
+    } catch (err: any) {
+      setApiError("Erro ao salvar termo de ciência: " + err.message);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const exportBackup = async () => {
+    if (userRole !== 'master') return;
+    
+    setIsSaving(true);
+    setApiError(null);
+    
+    try {
+      // Fetch ALL ETPs (including those not in current state)
+      const etpsSnap = await getDocs(query(collection(db, 'etps'), limit(500)));
+      const allEtps = etpsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      
+      // Fetch ALL Users
+      const usersSnap = await getDocs(collection(db, 'users'));
+      const allUsersData = usersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+      const backupData = {
+        version: 2,
+        exportDate: new Date().toISOString(),
+        drafts: allEtps,
+        users: allUsersData
+      };
+      
+      const now = new Date();
+      const year = now.getFullYear();
+      const month = String(now.getMonth() + 1).padStart(2, '0');
+      const day = String(now.getDate()).padStart(2, '0');
+      const hours = String(now.getHours()).padStart(2, '0');
+      const minutes = String(now.getMinutes()).padStart(2, '0');
+      
+      const filename = `ETP_DIGITAL_FULL_BACKUP_-_${year}_${month}_${day}_${hours}_${minutes}.json`;
+      
+      const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
+      saveAs(blob, filename);
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.LIST, 'backup');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const importBackup = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) {
+      console.log("Nenhum arquivo selecionado");
+      return;
+    }
+
+    setApiError("Lendo arquivo de backup...");
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      try {
+        const content = event.target?.result as string;
+        if (!content) throw new Error("O arquivo selecionado está vazio.");
+        
+        const backup = JSON.parse(content);
+        if (!backup.drafts || !Array.isArray(backup.drafts)) {
+          throw new Error("O arquivo não parece ser um backup válido do ETP Digital (lista de documentos não encontrada).");
+        }
+
+        setBackupToImport(backup);
+      } catch (err: any) {
+        console.error("Erro na leitura do arquivo:", err);
+        setApiError("Erro ao ler arquivo: " + (err.message || "Erro desconhecido"));
+      } finally {
+        e.target.value = '';
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const confirmImportBackup = async () => {
+    if (!backupToImport) return;
+    
+    setIsSaving(true);
+    setBackupToImport(null);
+    setApiError(null);
+    
+    try {
+      // Import Users
+      let userCount = 0;
+      if (backupToImport.users && Array.isArray(backupToImport.users)) {
+        const totalUsers = backupToImport.users.length;
+        for (let i = 0; i < totalUsers; i++) {
+          const u = backupToImport.users[i];
+          setImportProgress({ current: i + 1, total: totalUsers, type: 'Usuários' });
+          
+          const targetUid = u.uid || u.id;
+          if (targetUid) {
+            const cleanUserData = { 
+              ...u,
+              uid: targetUid // Ensure uid is present in the document data
+            };
+            // Remove 'id' if it exists as a top-level field from old backups
+            if ('id' in cleanUserData) delete (cleanUserData as any).id;
+            
+            if (cleanUserData.lastActive) cleanUserData.lastActive = serverTimestamp();
+            if (cleanUserData.createdAt) cleanUserData.createdAt = serverTimestamp();
+            
+            try {
+              await setDoc(doc(db, 'users', targetUid), cleanUserData);
+              userCount++;
+            } catch (e: any) {
+              console.error(`Erro ao importar usuário ${targetUid}:`, e);
+              throw new Error(`Falha no usuário ${cleanUserData.email || targetUid}: ${e.message}`);
+            }
+          }
+        }
+      }
+
+      // Import ETPs
+      let etpCount = 0;
+      if (backupToImport.drafts && Array.isArray(backupToImport.drafts)) {
+        const totalDrafts = backupToImport.drafts.length;
+        for (let i = 0; i < totalDrafts; i++) {
+          const draft = backupToImport.drafts[i];
+          setImportProgress({ current: i + 1, total: totalDrafts, type: 'ETPs' });
+          
+          const id = draft.id;
+          if (id) {
+            const cleanData = { ...draft };
+            if ('id' in cleanData) delete cleanData.id;
+            
+            // Prepare dates
+            if (cleanData.createdAt) cleanData.createdAt = serverTimestamp();
+            if (cleanData.updatedAt) cleanData.updatedAt = serverTimestamp();
+            
+            try {
+              await setDoc(doc(db, 'etps', id), cleanData);
+              etpCount++;
+            } catch (e: any) {
+              console.error(`Erro ao importar ETP ${id}:`, e);
+              throw new Error(`Falha no ETP "${cleanData.title || id}": ${e.message}`);
+            }
+          }
+        }
+      }
+      
+      setApiError(`Importação concluída com sucesso! ${userCount} usuários e ${etpCount} estudos (ETPs) foram importados.`);
+      setTimeout(() => setApiError(null), 5000);
+    } catch (err: any) {
+      console.error("Erro ao restaurar backup:", err);
+      setApiError("Erro ao restaurar backup: " + (err.message || "Erro desconhecido"));
+    } finally {
+      setIsSaving(false);
+      setImportProgress(null);
+    }
+  };
+
+
+
+  const handleAiAssist = async (fieldId: ETPField) => {
+    if (!formData || isAdminViewing) return;
+    setApiError(null);
+    setIsGenerating(fieldId);
+    const field = structure.find(s => s.id === fieldId);
+    const fieldName = field?.label;
+    
+    try {
+      let customKeyHeader = undefined;
+      try {
+        const settingsKey = systemSettings?.geminiApiKey;
+        if (settingsKey && settingsKey.trim().length > 10) {
+          customKeyHeader = settingsKey.trim();
+        }
+      } catch (e) {}
+
+      const result = await requestAiAssist({
+        fieldId,
+        fieldName,
+        instruction: field?.instruction || '',
+        formData,
+        customApiKey: customKeyHeader
+      });
+
+      console.log(`AI Assist Response for ${fieldId}:`, result);
+      
+      if (result) {
+        // Clean markdown if present
+        const cleaned = result.replace(/```[a-z]*\n?|```/g, '').trim();
+        setAiPopup({ fieldId, content: cleaned });
+      } else {
+        throw new Error("A IA não retornou conteúdo.");
+      }
+    } catch (err: any) {
+      console.error(`Erro AI Assist (${fieldId}):`, err);
+      setApiError(err.message || "Erro ao gerar conteúdo");
+    } finally {
+      setIsGenerating(null);
+    }
+  };
+
+  const acceptAiSuggestion = () => {
+    if (aiPopup) {
+      setFormData(prev => ({ ...prev, [aiPopup.fieldId]: aiPopup.content }));
+      setAiPopup(null);
+    }
+  };
+
+  const getMissingMandatoryFields = () => {
+    if (!formData) return [];
+    const mandatoryFieldsList: { id: ETPField; label: string }[] = [
+      { id: 'diag_problema_necessidade', label: '1. Problema ou Necessidade' },
+      { id: 'diag_alternativas_solucao', label: '2. Alternativas de Solução' },
+      { id: 'diag_objeto_vigencia', label: '3. Objeto e Vigência' },
+      { id: 'diag_exigencias_padroes', label: '4. Exigências e Padrões' },
+      { id: 'diag_quantidades_valor', label: '5. Quantidades e Valor' },
+      { id: 'diag_parcelamento_providencias', label: '6. Parcelamento e Providências' },
+      { id: 'diag_correlatas_ambientais', label: '7. Correlatas e Ambientais' },
+      { id: 'diag_riscos_sucesso', label: '8. Riscos ao Sucesso' }
+    ];
+    return mandatoryFieldsList.filter(item => (String(formData[item.id] || '').trim().length) <= 10);
+  };
+
+  const isMandatoryFilled = () => {
+    return getMissingMandatoryFields().length === 0;
+  };
+
+  const handleGlobalGenerate = async (fillEmpty: boolean = true) => {
+    if (!formData || isAdminViewing) return;
+    const missing = getMissingMandatoryFields();
+    if (missing.length > 0) {
+      setApiError(
+        `Para gerar o estudo técnico completo com IA, preencha com mais de 10 caracteres os seguintes campos essenciais do Diagnóstico: ${missing.map(m => m.label).join(', ')}.`
+      );
+      return;
+    }
+    setApiError(null);
+    setIsGenerating('global');
+    setShowGlobalConfirm(false);
+    try {
+      let customKeyHeader = undefined;
+      try {
+        const settingsKey = systemSettings?.geminiApiKey;
+        if (settingsKey && settingsKey.trim().length > 10) {
+          customKeyHeader = settingsKey.trim();
+        }
+      } catch (e) {}
+
+      const combinedData = await requestAiGenerateGlobal({
+        formData,
+        customApiKey: customKeyHeader
+      });
+
+      console.log("Combined AI Generated Data:", combinedData);
+
+      if (!combinedData || Object.keys(combinedData).length === 0) {
+        throw new Error("A IA retornou um estudo vazio. Tente fornecer mais detalhes no Diagnóstico Inicial.");
+      }
+
+      setFormData(prev => ({ ...prev, ...combinedData }));
+      setShowAdvanced(true);
+      setActiveTab('technical');
+    } catch (err: any) {
+      console.error("Erro Global Generate:", err);
+      setApiError(err.message || "Erro na geração global. Tente preencher os campos básicos primeiro.");
+    } finally {
+      setIsGenerating(null);
+    }
+  };
+
+
+
+  const handleExportDoc = async () => {
+    if (!formData) return;
+    setApiError(null);
+    try {
+      const filteredStructure = structure
+        .filter(s => !['responsavel'].includes(String(s.id)))
+        .filter(s => s.section !== '0. DIAGNÓSTICO INICIAL')
+        .filter(s => s.section !== 'VII - ASSINATURAS')
+        .filter(s => !['unidade_requisitante', 'processo_spae'].includes(String(s.id)))
+        .filter(s => s.id !== 'fotos' || (formData && formData.fotos))
+        .filter(s => s.id !== 'tabela_riscos_interna' || (formData && formData.include_riscos_interna))
+        .filter(s => s.id !== 'tabela_riscos_externa' || (formData && formData.include_riscos_externa));
+
+      const doc = new Document({
+        styles: {
+          default: {
+            document: {
+              run: {
+                font: "Arial",
+                size: 21,
+              },
+              paragraph: {
+                spacing: { line: 360 },
+              },
+            },
+          },
+          paragraphStyles: [
+            {
+              id: "Normal",
+              name: "Normal",
+              basedOn: "Normal",
+              next: "Normal",
+              quickFormat: true,
+              run: { size: 21, font: "Arial" },
+              paragraph: { spacing: { line: 360 } },
+            },
+            {
+              id: "heading1",
+              name: "Heading 1",
+              basedOn: "Normal",
+              next: "Normal",
+              quickFormat: true,
+              run: { size: 36, bold: true, font: "Arial", color: "000000" },
+              paragraph: { alignment: AlignmentType.CENTER, border: { bottom: { style: "single", size: 12, color: "000000" } }, spacing: { after: 400 } },
+            },
+            {
+              id: "heading2",
+              name: "Heading 2",
+              basedOn: "Normal",
+              next: "Normal",
+              quickFormat: true,
+              run: { size: 24, bold: true, font: "Arial", color: "000000" },
+              paragraph: { 
+                shading: { fill: "F0F0F0" }, 
+                border: { top: { style: "single", size: 6 }, bottom: { style: "single", size: 6 }, left: { style: "single", size: 6 }, right: { style: "single", size: 6 } },
+                spacing: { before: 400, after: 200 } 
+              },
+            },
+            {
+              id: "heading3",
+              name: "Heading 3",
+              basedOn: "Normal",
+              next: "Normal",
+              quickFormat: true,
+              run: { size: 22, bold: true, font: "Arial", color: "000000" },
+              paragraph: { 
+                border: { bottom: { style: "single", size: 6, color: "EEEEEE" } },
+                spacing: { before: 300, after: 100 } 
+              },
+            },
+          ],
+        },
+        sections: [{
+          properties: {},
+          children: [
+            new Paragraph({
+              children: [new TextRun({ text: "ESTUDO TÉCNICO PRELIMINAR", bold: true })],
+              style: "heading1",
+            }),
+            new Paragraph({
+              children: [new TextRun({ text: formData.etp_name || "Sem título", size: 24, bold: true })],
+              alignment: AlignmentType.CENTER,
+              spacing: { after: 400 }
+            }),
+            new Paragraph({
+              children: [new TextRun({ text: "I - INFORMAÇÕES GERAIS", bold: true })],
+              style: "heading2",
+            }),
+            new Paragraph({
+              children: [new TextRun({ text: "1. IDENTIFICAÇÃO DO PROCESSO E ÁREA REQUISITANTE", bold: true })],
+              style: "heading3",
+            }),
+            new DocxTable({
+              width: { size: 100, type: WidthType.PERCENTAGE },
+              rows: [
+                new DocxTableRow({
+                  children: [
+                    new DocxTableCell({ 
+                      shading: { fill: "F9F9F9" },
+                      children: [new Paragraph({ children: [new TextRun({ text: "Nº Processo SPAE", size: 18, bold: true })] })] 
+                    }),
+                    new DocxTableCell({ 
+                      shading: { fill: "F9F9F9" },
+                      children: [new Paragraph({ children: [new TextRun({ text: "Área Demandante", size: 18, bold: true })] })] 
+                    }),
+                  ],
+                }),
+                new DocxTableRow({
+                  children: [
+                    new DocxTableCell({ children: [new Paragraph({ children: [new TextRun(formData.processo_spae || "---")] })] }),
+                    new DocxTableCell({ children: [new Paragraph({ children: [new TextRun(formData.unidade_requisitante || "---")] })] }),
+                  ],
+                }),
+              ],
+            }),
+            ...filteredStructure
+              .filter(item => item.id !== 'assinaturas')
+              .flatMap(item => {
+                const elements: any[] = [];
+                const firstInSection = filteredStructure.find(s => s.section === item.section)?.id === item.id;
+                
+                if (firstInSection && item.section && item.section !== 'I - INFORMAÇÕES GERAIS') {
+                  elements.push(new Paragraph({ children: [new TextRun({ text: item.section, bold: true })], style: "heading2" }));
+                }
+
+                elements.push(new Paragraph({
+                  children: [new TextRun({ text: item.label.toUpperCase(), bold: true })],
+                  style: "heading3",
+                }));
+
+                let content = String(formData[item.id] || "---");
+                
+                if (item.id === 'requisitos_header' && (!formData[item.id] || formData[item.id] === '')) {
+                  return elements;
+                }
+
+                if (['tabela_estimativa_quantitativos_precos', 'tabela_riscos_interna', 'tabela_riscos_externa'].includes(String(item.id))) {
+                  const parser = new DOMParser();
+                  const htmlDoc = parser.parseFromString(content, 'text/html');
+                  const tableElement = htmlDoc.querySelector('table');
+                  
+                  if (tableElement) {
+                    const rows = Array.from(tableElement.querySelectorAll('tr'));
+                    
+                    if (rows.length > 0) {
+                      elements.push(new DocxTable({
+                        width: { size: 100, type: WidthType.PERCENTAGE },
+                        rows: rows.map(row => {
+                          const htmlRow = row as HTMLElement;
+                          return new DocxTableRow({
+                            children: (() => {
+                              const cells = Array.from(htmlRow.querySelectorAll('td, th'));
+                              if (cells.length === 0) {
+                                return [new DocxTableCell({ children: [new Paragraph({ children: [new TextRun("")] })] })];
+                              }
+                              return cells.map(cell => {
+                                const htmlCell = cell as HTMLElement;
+                                const style = htmlCell.getAttribute('style') || '';
+                                const parentStyle = htmlRow.getAttribute('style') || '';
+                                const hasBg = style.includes('background-color') || parentStyle.includes('background-color');
+                                const isBold = htmlCell.tagName === 'TH' || style.includes('font-weight:bold') || parentStyle.includes('font-weight:bold');
+                                
+                                return new DocxTableCell({
+                                  shading: (htmlCell.tagName === 'TH' || hasBg) ? { fill: "F5F5F5" } : undefined,
+                                  columnSpan: parseInt(htmlCell.getAttribute('colspan') || '1'),
+                                  children: [new Paragraph({ 
+                                    children: [new TextRun({ 
+                                      text: (htmlCell.textContent || "").trim(), 
+                                      bold: isBold 
+                                    })],
+                                    alignment: htmlCell.style.textAlign === 'center' ? AlignmentType.CENTER : 
+                                               htmlCell.style.textAlign === 'right' ? AlignmentType.RIGHT : 
+                                               AlignmentType.LEFT
+                                  })],
+                                });
+                              });
+                            })(),
+                          });
+                        }),
+                      }));
+                      return elements;
+                    }
+                  }
+                  content = htmlDoc.body.textContent || "";
+                }
+
+                if (item.id === 'fotos' && formData.fotos) {
+                  try {
+                    const images = JSON.parse(formData.fotos);
+                    images.forEach((img: string) => {
+                      if (img && img.includes('base64')) {
+                        elements.push(new Paragraph({
+                          children: [
+                            new ImageRun({
+                              data: base64ToUint8Array(img),
+                              transformation: {
+                                width: 500,
+                                height: 350,
+                              },
+                            } as any),
+                          ],
+                          alignment: AlignmentType.CENTER,
+                          spacing: { before: 200, after: 200 }
+                        }));
+                      }
+                    });
+                    return elements;
+                  } catch (e) {
+                    return elements;
+                  }
+                }
+
+                elements.push(new Paragraph({
+                  children: [new TextRun(String(content))],
+                  alignment: AlignmentType.JUSTIFIED,
+                  spacing: { after: 200 }
+                }));
+
+                return elements;
+              }),
+            ...(() => {
+              const signatureLines = (formData.assinaturas || "")
+                .split('\n')
+                .map(line => line.trim())
+                .filter(line => line.length > 0);
+
+              if (signatureLines.length === 0) return [];
+
+              const rows: DocxTableRow[] = [];
+              for (let i = 0; i < signatureLines.length; i += 2) {
+                const left = signatureLines[i];
+                const right = signatureLines[i + 1];
+
+                const rowChildren = [];
+                
+                // Left signature
+                const [leftName, leftDept] = left.split(',').map(s => s.trim());
+                rowChildren.push(new DocxTableCell({
+                  borders: {
+                    top: { style: "none" },
+                    bottom: { style: "none" },
+                    left: { style: "none" },
+                    right: { style: "none" },
+                  },
+                  children: [
+                    new Paragraph({
+                      children: [new TextRun({ text: (leftName || "").toUpperCase(), size: 18, bold: true })],
+                      alignment: AlignmentType.CENTER,
+                    }),
+                    new Paragraph({
+                      children: [new TextRun({ text: leftDept || "", size: 16 })],
+                      alignment: AlignmentType.CENTER,
+                    })
+                  ]
+                }));
+
+                // Right signature (if exists)
+                if (right) {
+                  const [rightName, rightDept] = right.split(',').map(s => s.trim());
+                  rowChildren.push(new DocxTableCell({
+                    borders: {
+                      top: { style: "none" },
+                      bottom: { style: "none" },
+                      left: { style: "none" },
+                      right: { style: "none" },
+                    },
+                    children: [
+                      new Paragraph({
+                        children: [new TextRun({ text: (rightName || "").toUpperCase(), size: 18, bold: true })],
+                        alignment: AlignmentType.CENTER,
+                      }),
+                      new Paragraph({
+                        children: [new TextRun({ text: rightDept || "", size: 16 })],
+                        alignment: AlignmentType.CENTER,
+                      })
+                    ]
+                  }));
+                } else {
+                  rowChildren.push(new DocxTableCell({ 
+                    borders: { top: { style: "none" }, bottom: { style: "none" }, left: { style: "none" }, right: { style: "none" } }, 
+                    children: [new Paragraph({ children: [new TextRun("")] })] 
+                  }));
+                }
+
+                rows.push(new DocxTableRow({ children: rowChildren }));
+                rows.push(new DocxTableRow({ children: [new DocxTableCell({ children: [new Paragraph({ children: [new TextRun("")] })] }), new DocxTableCell({ children: [new Paragraph({ children: [new TextRun("")] })] })] }));
+              }
+
+              return [
+                new Paragraph({ children: [new TextRun("")], spacing: { before: 800 } }),
+                new Paragraph({
+                  children: [new TextRun(`Curitiba, ${formatDateLong(formData.data_documento)}`)],
+                  alignment: AlignmentType.CENTER,
+                  spacing: { before: 400, after: 600 }
+                }),
+                new DocxTable({
+                  width: { size: 100, type: WidthType.PERCENTAGE },
+                  borders: {
+                    top: { style: "none" },
+                    bottom: { style: "none" },
+                    left: { style: "none" },
+                    right: { style: "none" },
+                    insideHorizontal: { style: "none" },
+                    insideVertical: { style: "none" },
+                  },
+                  rows: rows,
+                }),
+              ];
+            })(),
+          ],
+        }],
+      });
+
+      const blob = await Packer.toBlob(doc);
+      const now = new Date();
+      const dateStr = now.toISOString().split('T')[0].replace(/-/g, '_');
+      const filename = `${(formData.etp_name || 'ETP_Digital').replace(/[/\\?%*:|"<>]/g, '_')}_-_${dateStr}.docx`;
+      saveAs(blob, filename);
+    } catch (err: any) {
+      console.error("Erro ao exportar DOCX:", err);
+      setApiError("Erro ao exportar DOCX. Verifique se os dados estão corretos.");
+    }
+  };
+
+  const handlePrint = () => {
+    if (!formData) return;
+    const now = new Date();
+    const dateStr = now.toISOString().split('T')[0].replace(/-/g, '_');
+    const filename = `${(formData.etp_name || 'ETP_Digital').replace(/[/\\?%*:|"<>]/g, '_')}_-_${dateStr}`;
+    
+    const printWindow = window.open('', '_blank');
+    if (printWindow) {
+      printWindow.document.write(`
+        <html>
+          <head>
+            <title>${filename}</title>
+            <style>
+              body { font-family: "Arial", sans-serif; padding: 2cm; color: #1a1a1a; line-height: 1.6; }
+              .doc-container { max-width: 21cm; margin: 0 auto; }
+              .header { text-align: center; margin-bottom: 40px; border-bottom: 2px solid #000; padding-bottom: 20px; }
+              .header h1 { font-size: 18pt; margin: 0; text-transform: uppercase; }
+              .section-title { background: #f0f0f0; padding: 8px 12px; font-weight: bold; text-transform: uppercase; margin-top: 30px; border: 1px solid #ccc; font-size: 12pt; }
+              .field-title { font-weight: bold; text-transform: uppercase; margin-top: 20px; border-bottom: 1px solid #eee; padding-bottom: 4px; font-size: 11pt; }
+              .field-content { font-size: 10.5pt; text-align: justify; margin-bottom: 15px; white-space: pre-wrap; color: #333; }
+              .info-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; border: 1px solid #000; margin-bottom: 20px; }
+              .info-item { padding: 8px; border-right: 1px solid #000; }
+              .info-item:last-child { border-right: none; }
+              .info-label { font-weight: bold; font-size: 9pt; text-transform: uppercase; display: block; margin-bottom: 4px; }
+              .info-value { font-size: 10pt; }
+              .signature-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; margin-top: 60px; }
+              .signature-box { border-top: none; padding-top: 8px; text-align: center; font-size: 9pt; }
+              .tiptap-content table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+              .tiptap-content td, .tiptap-content th { border: 1px solid #000; padding: 5px; text-align: left; font-size: 10pt; }
+              .tiptap-content th { background: #f5f5f5; }
+              @media print {
+                body { padding: 0; }
+                .doc-container { width: 100%; }
+              }
+            </style>
+          </head>
+          <body>
+            <div class="doc-container">
+              <div class="header">
+                <h1>ESTUDO TÉCNICO PRELIMINAR</h1>
+                <div style="font-size: 12pt; margin-top: 10px; font-weight: bold;">${formData.etp_name || 'Sem título'}</div>
+              </div>
+
+              <div class="section-title">I - INFORMAÇÕES GERAIS</div>
+              <div class="field-title">1. IDENTIFICAÇÃO DO PROCESSO E ÁREA REQUISITANTE</div>
+              <div class="info-grid" style="grid-template-columns: 1fr 1fr;">
+                <div class="info-item">
+                  <span class="info-label">Nº Processo SPAE</span>
+                  <div class="info-value">${formData.processo_spae || '---'}</div>
+                </div>
+                <div class="info-item">
+                  <span class="info-label">Área Demandante</span>
+                  <div class="info-value">${formData.unidade_requisitante || '---'}</div>
+                </div>
+              </div>
+
+              ${structure
+                .filter(s => !['responsavel'].includes(String(s.id)))
+                .filter(s => s.section !== '0. DIAGNÓSTICO INICIAL')
+                .filter(s => s.section !== 'VII - ASSINATURAS')
+                .filter(s => !['unidade_requisitante', 'processo_spae'].includes(String(s.id)))
+                .filter(s => s.id !== 'tabela_riscos_interna' || (formData && formData.include_riscos_interna))
+                .filter(s => s.id !== 'tabela_riscos_externa' || (formData && formData.include_riscos_externa))
+                .map(item => {
+                  const content = formData[item.id];
+                  if (item.id === 'fotos' && !content) return '';
+                  
+                  // Section header logic
+                  const itemsInSection = structure.filter(s => s.section === item.section && s.section !== '0. DIAGNÓSTICO INICIAL' && !['responsavel'].includes(String(s.id)));
+                  const isFirstInSection = itemsInSection[0]?.id === item.id;
+                  const sectionHeader = (isFirstInSection && item.section && item.section !== 'I - INFORMAÇÕES GERAIS') 
+                    ? `<div class="section-title">${item.section}</div>` 
+                    : '';
+
+                  if (item.id === 'requisitos_header') {
+                    return `
+                      ${sectionHeader}
+                      <div class="field-title">${item.label}</div>
+                      ${content ? `<div class="field-content">${content}</div>` : ''}
+                    `;
+                  }
+
+                  let displayContent = '';
+                  if (['tabela_estimativa_quantitativos_precos', 'tabela_riscos_interna', 'tabela_riscos_externa'].includes(String(item.id))) {
+                    displayContent = `<div class="tiptap-content">${String(content || '---')}</div>`;
+                  } else if (item.id === 'fotos') {
+                    try {
+                      const images = JSON.parse(String(content));
+                      displayContent = `<div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-top: 10px;">
+                        ${images.map((img: string) => `<img src="${img}" style="width: 100%; border-radius: 8px; border: 1px solid #ccc;" />`).join('')}
+                      </div>`;
+                    } catch (e) { displayContent = ''; }
+                  } else {
+                    displayContent = `<div class="field-content">${content || '---'}</div>`;
+                  }
+
+                  return `
+                    ${sectionHeader}
+                    <div class="field-title">${item.label}</div>
+                    ${displayContent}
+                  `;
+                }).join('')}
+
+              <div style="margin-top: 60px; text-align: center; font-weight: bold; font-size: 11pt; margin-bottom: 40px;">
+                Curitiba, ${formatDateLong(formData.data_documento)}
+              </div>
+              <div class="signature-grid">
+                ${(formData.assinaturas || "")
+                  .split('\n')
+                  .map(line => line.trim())
+                  .filter(line => line.length > 0)
+                  .map(line => {
+                    const [name, dept] = line.split(',').map(s => s.trim());
+                    return `
+                      <div class="signature-box">
+                        <strong>${(name || "").toUpperCase()}</strong><br/>
+                        ${dept || ""}
+                      </div>
+                    `;
+                  }).join('')}
+              </div>
+            </div>
+            <script>
+              window.onload = () => {
+                window.focus();
+                window.print();
+                window.close();
+              };
+            </script>
+          </body>
+        </html>
+      `);
+      printWindow.document.close();
+    } else {
+      window.focus();
+      window.print();
+    }
+  };
+
+  const handleClearData = () => {
+    setFormData(INITIAL_STATE);
+    localStorage.removeItem('etp_pro_v4');
+    setShowClearConfirm(false);
+    setShowAdvanced(false);
+    setViewMode('edit');
+  };
+
+  if (!isAuthReady) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <Loader2 size={48} className="animate-spin text-indigo-600" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-white p-12 rounded-[40px] shadow-2xl border border-slate-200 max-w-md w-full text-center"
+        >
+          <div className="bg-indigo-600 w-20 h-20 rounded-3xl flex items-center justify-center text-white mx-auto mb-8 shadow-xl shadow-indigo-200">
+            <Icon name="Wand2" size={40} />
+          </div>
+          <h1 className="text-3xl font-black text-slate-900 mb-4 tracking-tight uppercase">
+            V<span className="text-indigo-600">IA</span>BILIZA
+          </h1>
+          <p className="text-slate-500 mb-10 leading-relaxed">
+            Acesse com sua conta institucional para gerenciar seus Estudos Técnicos Preliminares.
+          </p>
+          
+          {apiError && (
+            <div className="mb-6 p-4 bg-red-50 border border-red-100 rounded-2xl text-red-600 text-xs font-bold leading-relaxed">
+              {apiError}
+            </div>
+          )}
+
+          <button 
+            onClick={(e) => handleLogin(e)}
+            disabled={isLoggingIn}
+            className={`w-full bg-white border-2 border-slate-200 text-slate-700 py-4 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-slate-50 transition-all shadow-sm ${isLoggingIn ? 'opacity-50 cursor-not-allowed' : ''}`}
+          >
+            {isLoggingIn ? (
+              <Loader2 size={20} className="animate-spin text-indigo-600" />
+            ) : (
+              <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
+            )}
+            {isLoggingIn ? 'Autenticando...' : 'Entrar com Google'}
+          </button>
+
+          <button 
+            onClick={handleDemoLogin}
+            className="w-full mt-3 bg-indigo-600 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 text-xs uppercase tracking-widest font-black"
+          >
+            <Icon name="Zap" size={16} /> Entrar em Modo Demonstração (Demo)
+          </button>
+          <p className="mt-8 text-[10px] text-slate-400 uppercase font-black tracking-widest leading-relaxed">
+            Desenvolvido pela Diretoria de Contratações da Câmara Municipal de Curitiba
+          </p>
+        </motion.div>
+      </div>
+    );
+  }
+
+  const Modals = () => (
+    <AnimatePresence>
+      {reassignState && (
+        <div key="modal-reassign-overlay" className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <motion.div 
+            key="reassign-modal-content"
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="bg-white rounded-3xl p-8 max-w-lg w-full shadow-2xl border border-slate-200 relative"
+          >
+            <button onClick={() => setReassignState(null)} className="absolute top-6 right-6 p-2 text-slate-300 hover:text-slate-600 transition-colors">
+              <Icon name="X" size={20} />
+            </button>
+            <div className="w-16 h-16 bg-indigo-50 rounded-2xl flex items-center justify-center text-indigo-600 mb-6">
+              <Icon name="ShieldCheck" size={32} />
+            </div>
+            <h3 className="text-xl font-black text-slate-900 mb-2">Reatribuir Autor</h3>
+            <p className="text-slate-500 text-sm mb-6 leading-relaxed">
+              Transfira a propriedade do ETP <span className="font-bold text-slate-900">"{reassignState.title}"</span> para outro servidor.
+            </p>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">E-mail do Novo Autor</label>
+                <input 
+                  type="email" 
+                  id="newAuthorEmail"
+                  placeholder="exemplo@cmc.pr.gov.br"
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold focus:bg-white focus:border-indigo-600 transition-all outline-none"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      reassignDraft(reassignState.draftId, (e.target as HTMLInputElement).value);
+                    }
+                  }}
+                />
+              </div>
+              
+              <button 
+                onClick={() => {
+                  const input = document.getElementById('newAuthorEmail') as HTMLInputElement;
+                  reassignDraft(reassignState.draftId, input.value);
+                }}
+                disabled={isSaving}
+                className="w-full py-4 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200 flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {isSaving ? <Loader2 size={16} className="animate-spin text-white" /> : <Icon name="Check" size={16} />} 
+                Confirmar Transferência
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {deleteConfirmId && (
+        <div key="modal-delete-overlay" className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <motion.div 
+            key="delete-confirm-content"
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl border border-slate-200"
+          >
+            <div className="w-16 h-16 bg-red-50 rounded-2xl flex items-center justify-center text-red-600 mb-6">
+              <Icon name="Trash2" size={32} />
+            </div>
+            <h3 className="text-xl font-black text-slate-900 mb-2">Excluir ETP?</h3>
+            <p className="text-slate-500 text-sm leading-relaxed mb-8">
+              Tem certeza que deseja excluir este Estudo Técnico Preliminar?
+            </p>
+            <div className="flex gap-3">
+              <button 
+                onClick={() => setDeleteConfirmId(null)}
+                className="flex-1 px-6 py-3 rounded-xl text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 transition-colors"
+              >
+                Cancelar
+              </button>
+              <button 
+                onClick={() => deleteConfirmId && deleteDraft(deleteConfirmId)}
+                className="flex-1 px-6 py-3 rounded-xl text-xs font-bold text-white bg-red-600 hover:bg-red-700 transition-colors shadow-lg shadow-red-200"
+              >
+                Sim, Excluir
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {userToDelete && (
+        <div key="modal-user-delete-overlay" className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <motion.div 
+            key="user-delete-modal-content"
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl border border-slate-200"
+          >
+            <div className="w-16 h-16 bg-red-50 rounded-2xl flex items-center justify-center text-red-600 mb-6">
+              <Icon name="AlertTriangle" size={32} />
+            </div>
+            <h3 className="text-xl font-black text-slate-900 mb-2">Excluir Usuário?</h3>
+            <p className="text-slate-500 text-sm leading-relaxed mb-6">
+              Você está prestes a excluir permanentemente o usuário <span className="font-bold text-slate-900">{userToDelete.email}</span>. Esta ação não pode ser desfeita.
+            </p>
+            
+            <label className="flex items-center gap-3 p-4 bg-red-50 rounded-2xl border border-red-100 mb-8 cursor-pointer group">
+              <input 
+                type="checkbox" 
+                checked={confirmDeleteCheckbox}
+                onChange={(e) => setConfirmDeleteCheckbox(e.target.checked)}
+                className="w-5 h-5 rounded border-red-300 text-red-600 focus:ring-red-500"
+              />
+              <span className="text-xs font-bold text-red-700 uppercase tracking-tight">Tenho certeza</span>
+            </label>
+
+            <div className="flex gap-3">
+              <button 
+                onClick={() => {
+                  setUserToDelete(null);
+                  setConfirmDeleteCheckbox(false);
+                }}
+                className="flex-1 px-6 py-3 rounded-xl text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 transition-colors"
+              >
+                Cancelar
+              </button>
+              <button 
+                disabled={!confirmDeleteCheckbox}
+                onClick={() => deleteUser(userToDelete.id)}
+                className={`flex-1 px-6 py-3 rounded-xl text-xs font-bold text-white transition-all shadow-lg ${confirmDeleteCheckbox ? 'bg-red-600 hover:bg-red-700 shadow-red-200' : 'bg-slate-300 cursor-not-allowed shadow-none'}`}
+              >
+                Sim, Excluir
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {showClearConfirm && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl border border-slate-200"
+          >
+            <div className="w-16 h-16 bg-red-50 rounded-2xl flex items-center justify-center text-red-600 mb-6">
+              <Icon name="AlertTriangle" size={32} />
+            </div>
+            <h3 className="text-xl font-black text-slate-900 mb-2">Iniciar Novo ETP?</h3>
+            <p className="text-slate-500 text-sm leading-relaxed mb-8">
+              Isso irá apagar permanentemente todos os dados preenchidos até agora. Esta ação não pode ser desfeita.
+            </p>
+            <div className="flex gap-3">
+              <button 
+                onClick={() => setShowClearConfirm(false)}
+                className="flex-1 px-6 py-3 rounded-xl text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 transition-colors"
+              >
+                Cancelar
+              </button>
+              <button 
+                onClick={() => {
+                  setFormData(INITIAL_STATE);
+                  setCurrentDraftId(null);
+                  setShowClearConfirm(false);
+                  setShowAdvanced(false);
+                }}
+                className="flex-1 px-6 py-3 rounded-xl text-xs font-bold text-white bg-red-600 hover:bg-red-700 transition-colors shadow-lg shadow-red-200"
+              >
+                Sim, Limpar
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {/* Quota Exceeded Modal */}
+      {quotaExceeded && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-[10000] flex items-center justify-center p-4">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-white rounded-[40px] p-8 max-w-md w-full shadow-2xl border border-red-200"
+          >
+            <div className="w-16 h-16 bg-red-50 rounded-2xl flex items-center justify-center text-red-600 mb-6 mx-auto">
+              <Icon name="Database" size={32} />
+            </div>
+            <h3 className="text-xl font-black text-slate-900 mb-2 text-center">Limite do Banco Atingido</h3>
+            <p className="text-slate-500 text-sm leading-relaxed mb-6 text-center">
+              O limite gratuito diário de uso do banco de dados (Firebase Firestore) foi esgotado. Isso ocorre porque o sistema realiza auto-salvamentos constantes.
+            </p>
+            <p className="text-slate-500 text-sm leading-relaxed mb-8 text-center">
+              Você pode voltar a utilizá-lo amanhã (após a redefinição do limite) ou então será necessário habilitar o faturamento no console do Firebase (Plano Blaze).
+            </p>
+            <div className="flex gap-3">
+              <button 
+                onClick={() => setQuotaExceeded(false)}
+                className="w-full px-6 py-3 rounded-xl text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 transition-colors shadow-lg"
+              >
+                Entendi
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {/* Saving Exit Popup */}
+      {isSavingExit && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-[10000] flex items-center justify-center p-4">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-white rounded-[40px] p-8 max-w-sm w-full shadow-2xl border border-indigo-100"
+          >
+            <div className="w-16 h-16 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mb-6 mx-auto">
+              <Loader2 size={32} className="animate-spin" />
+            </div>
+            <h3 className="text-lg font-black text-slate-900 mb-2 text-center">Salvando...</h3>
+            <p className="text-slate-500 text-sm leading-relaxed text-center">
+              Estamos salvando suas alterações antes de sair.
+            </p>
+          </motion.div>
+        </div>
+      )}
+
+      {/* Welcome Disclaimer Popup */}
+      {showWelcomePopup && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-[10000] flex items-center justify-center p-4 overflow-y-auto">
+          <motion.div 
+            initial={{ opacity: 0, y: 20, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            className="bg-white rounded-[40px] p-8 md:p-12 max-w-2xl w-full shadow-2xl border border-slate-100 my-8"
+          >
+            <div className="w-20 h-20 bg-indigo-50 text-indigo-600 rounded-3xl flex items-center justify-center mb-8 shadow-lg shadow-indigo-100 mx-auto">
+              <Icon name="Sparkles" size={40} />
+            </div>
+            
+            <h2 className="text-3xl font-black text-slate-900 text-center mb-6 tracking-tight">
+              Bem-vindo ao Assistente de ETP!
+            </h2>
+            
+            <div className="bg-slate-50 rounded-3xl p-6 md:p-8 mb-8 border border-slate-100">
+              <div className="text-slate-600 text-sm leading-relaxed space-y-4">
+                <p>
+                  Eu sou o <strong>Diego Martins</strong>, aqui da Diretoria de Contratações. Desenvolvi esta ferramenta para tentar facilitar nossa vida na elaboração dos Estudos Técnicos Preliminares, automatizando aquela parte mais "braçal" do texto.
+                </p>
+                <p>
+                  Como sou eu que estou tocando esse projeto sozinho e ainda estamos em fase de testes (Beta), preciso combinar alguns pontos importantes com você:
+                </p>
+                <ul className="space-y-3">
+                  <li className="flex gap-3">
+                    <span className="text-indigo-600 font-bold">•</span>
+                    <span><strong>A IA pode falhar:</strong> Por mais que o modelo seja treinado, ele pode gerar interpretações equivocadas ou dados imprecisos.</span>
+                  </li>
+                  <li className="flex gap-3">
+                    <span className="text-indigo-600 font-bold">•</span>
+                    <span><strong>A responsabilidade é humana:</strong> Este sistema é um auxiliar, não um substituto. O conteúdo gerado deve ser revisado e validado por você antes de qualquer prosseguimento oficial.</span>
+                  </li>
+                  <li className="flex gap-3">
+                    <span className="text-indigo-600 font-bold">•</span>
+                    <span><strong>Conformidade Legal:</strong> Verifique se a solução sugerida atende plenamente ao interesse público e se as justificativas de viabilidade técnica e econômica estão coerentes com a realidade da sua demanda.</span>
+                  </li>
+                </ul>
+                <p className="pt-2 font-medium italic text-slate-500">
+                  Use a ferramenta para ganhar tempo e estruturar suas ideias, mas mantenha sempre o olhar crítico de quem assina o documento.
+                </p>
+                <p className="font-bold text-indigo-600">
+                  Conto com seu feedback para continuarmos melhorando nossos processos!
+                </p>
+              </div>
+            </div>
+
+            <label className="flex items-start gap-4 p-6 bg-indigo-50/50 rounded-2xl border border-indigo-100 mb-8 cursor-pointer hover:bg-indigo-50 transition-colors group">
+              <div className="pt-1">
+                <input 
+                  type="checkbox" 
+                  checked={welcomeCheckbox}
+                  onChange={(e) => setWelcomeCheckbox(e.target.checked)}
+                  className="w-6 h-6 rounded-lg border-indigo-300 text-indigo-600 focus:ring-indigo-500 transition-all cursor-pointer"
+                />
+              </div>
+              <span className="text-sm font-bold text-indigo-900 leading-tight">
+                Estou ciente de que se trata de uma ferramenta em testes e me comprometo com a validação de todas as respostas geradas pela inteligência artificial.
+              </span>
+            </label>
+
+            <button 
+              disabled={!welcomeCheckbox || isSaving}
+              onClick={handleAcceptTerms}
+              className={`w-full py-5 rounded-2xl text-lg font-black transition-all shadow-xl flex items-center justify-center gap-3 ${
+                welcomeCheckbox && !isSaving
+                  ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200' 
+                  : 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none'
+              }`}
+            >
+              {isSaving ? (
+                <Icon name="Loader2" className="animate-spin" />
+              ) : (
+                <>Começar a usar <Icon name="ArrowRight" size={20} /></>
+              )}
+            </button>
+          </motion.div>
+        </div>
+      )}
+
+      {aiPopup && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[110] flex items-center justify-center p-4 no-print">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95, y: 20 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: 20 }}
+            className="bg-white rounded-[32px] p-8 max-w-3xl w-full shadow-2xl border border-slate-200 max-h-[90vh] flex flex-col"
+          >
+            <div className="flex items-center justify-between mb-6 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-indigo-200">
+                  <Icon name="Sparkles" size={24} />
+                </div>
+                <div>
+                  <h3 className="text-xl font-black text-slate-900 leading-tight">Sugestão da IA</h3>
+                  <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Analise a proposta antes de aplicar ao seu ETP</p>
+                </div>
+              </div>
+              <button onClick={() => setAiPopup(null)} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
+                <Icon name="X" size={20} className="text-slate-400" />
+              </button>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto min-h-0 bg-slate-50 rounded-2xl border border-slate-100 p-6">
+              <h4 className="text-[10px] font-black text-indigo-600 uppercase tracking-widest mb-4 flex items-center gap-2">
+                <Icon name="FileText" size={12} />
+                {structure.find(s => s.id === aiPopup.fieldId)?.label}
+              </h4>
+              <div className="prose prose-slate prose-sm max-w-none">
+                {['tabela_estimativa_quantitativos_precos', 'tabela_riscos_interna', 'tabela_riscos_externa'].includes(aiPopup.fieldId) ? (
+                  <div 
+                    className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm overflow-x-auto tiptap-content"
+                    dangerouslySetInnerHTML={{ __html: aiPopup.content }}
+                  />
+                ) : (
+                  <div className="text-slate-700 leading-relaxed text-sm whitespace-pre-wrap bg-white p-6 rounded-xl border border-slate-200 shadow-sm font-medium">
+                    {aiPopup.content}
+                  </div>
+                )}
+              </div>
+              
+              {aiPopup.content.startsWith("NECESSITA COMPLEMENTAÇÃO") && (
+                <div className="mt-4 p-4 bg-amber-50 border border-amber-100 rounded-xl flex items-start gap-3">
+                  <Icon name="AlertTriangle" size={16} className="text-amber-600 shrink-0 mt-0.5" />
+                  <p className="text-[10px] text-amber-800 font-bold leading-tight">
+                    A IA identificou que faltam informações no diagnóstico para gerar um texto completo. 
+                    Revise os colchetes [ ] se decidir aplicar.
+                  </p>
+                </div>
+              )}
+            </div>
+            
+            <div className="grid grid-cols-2 gap-4 mt-8 shrink-0">
+              <button 
+                onClick={() => setAiPopup(null)}
+                className="px-6 py-4 rounded-2xl text-xs font-black uppercase tracking-widest text-slate-500 bg-slate-100 hover:bg-slate-200 transition-all flex items-center justify-center gap-2"
+              >
+                <Icon name="X" size={14} />
+                Descartar
+              </button>
+              <button 
+                onClick={acceptAiSuggestion}
+                className="px-6 py-4 rounded-2xl text-xs font-black uppercase tracking-widest text-white bg-indigo-600 hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100 flex items-center justify-center gap-2"
+              >
+                <Icon name="CheckCircle" size={14} />
+                Aplicar Sugestão
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {helpPopup && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="bg-white rounded-3xl p-8 max-w-2xl w-full shadow-2xl border border-slate-200 max-h-[90vh] overflow-y-auto"
+          >
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 bg-indigo-50 rounded-xl flex items-center justify-center text-indigo-600">
+                  <Icon name="Info" size={24} />
+                </div>
+                <h3 className="text-xl font-black text-slate-900">Orientações de Preenchimento</h3>
+              </div>
+              <button onClick={() => setHelpPopup(null)} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
+                <Icon name="X" size={20} className="text-slate-400" />
+              </button>
+            </div>
+            
+            <div className="bg-slate-50 rounded-2xl p-6 border border-slate-100">
+              <h4 className="text-xs font-black text-indigo-600 uppercase tracking-widest mb-4">{helpPopup.title}</h4>
+              <div className="text-slate-600 text-sm leading-relaxed space-y-4 whitespace-pre-wrap">
+                {helpPopup.content}
+              </div>
+            </div>
+            
+            <button 
+              onClick={() => setHelpPopup(null)}
+              className="w-full mt-8 px-6 py-3 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-100"
+            >
+              Entendi
+            </button>
+          </motion.div>
+        </div>
+      )}
+
+
+
+      {examplePopup && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="bg-white rounded-3xl p-8 max-w-2xl w-full shadow-2xl border border-slate-200 max-h-[90vh] overflow-y-auto"
+          >
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 bg-indigo-50 rounded-xl flex items-center justify-center text-indigo-600">
+                  <Icon name="Eye" size={24} />
+                </div>
+                <h3 className="text-xl font-black text-slate-900">Exemplos de Resposta</h3>
+              </div>
+              <button onClick={() => setExamplePopup(null)} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
+                <Icon name="X" size={20} className="text-slate-400" />
+              </button>
+            </div>
+            
+            <div className="space-y-6">
+              {examplePopup.examples.map((ex, idx) => (
+                <div key={idx} className="bg-slate-50 rounded-2xl p-6 border border-slate-100">
+                  <h4 className="text-xs font-black text-indigo-600 uppercase tracking-widest mb-2">{ex.title}</h4>
+                  <p className="text-slate-600 text-sm leading-relaxed italic">{ex.content}</p>
+                  <button 
+                    onClick={() => {
+                      setFormData(prev => ({ ...prev, [examplePopup.fieldId]: ex.content.replace(/^"|"$/g, '') }));
+                      setExamplePopup(null);
+                    }}
+                    className="mt-4 text-[10px] font-black text-indigo-600 uppercase tracking-widest hover:text-indigo-800 transition-colors flex items-center gap-1"
+                  >
+                    <Icon name="PlusCircle" size={12} /> Usar este exemplo
+                  </button>
+                </div>
+              ))}
+            </div>
+            
+            <button 
+              onClick={() => setExamplePopup(null)}
+              className="w-full mt-8 px-6 py-3 rounded-xl text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 transition-colors"
+            >
+              Fechar
+            </button>
+          </motion.div>
+        </div>
+      )}
+
+      {/* Backup Import Confirmation Modal */}
+      {backupToImport && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-white p-6 sm:p-8 rounded-[32px] shadow-2xl max-w-md w-full text-center"
+          >
+            <div className="w-16 h-16 bg-amber-50 text-amber-600 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg shadow-amber-100">
+              <Icon name="Download" size={32} className="rotate-180" />
+            </div>
+            <h3 className="text-xl font-black text-slate-900 mb-2">Confirmar Restauração</h3>
+            <p className="text-slate-500 mb-8 leading-relaxed text-xs">
+              O arquivo contém <strong>{backupToImport.drafts.length} ETPs</strong> e <strong>{backupToImport.users?.length || 0} usuários</strong>. 
+              Deseja prosseguir com a importação? Dados existentes com o mesmo ID serão sobrescritos.
+            </p>
+            <div className="flex gap-3">
+              <button 
+                onClick={() => setBackupToImport(null)}
+                className="flex-1 py-4 bg-slate-100 text-slate-600 rounded-2xl font-bold hover:bg-slate-200 transition-all font-black uppercase tracking-widest text-[10px]"
+              >
+                Cancelar
+              </button>
+              <button 
+                onClick={confirmImportBackup}
+                className="flex-1 py-4 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200 font-black uppercase tracking-widest text-[10px]"
+              >
+                Confirmar
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {/* Global Loading Overlay */}
+      {importProgress && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[9999] flex items-center justify-center p-6 text-center">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-white p-8 rounded-[32px] shadow-2xl max-w-sm w-full"
+          >
+            <div className="w-16 h-16 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg shadow-indigo-100">
+              <Icon name="Loader2" size={32} className="animate-spin" />
+            </div>
+            <h3 className="text-xl font-black text-slate-900 mb-2">
+              Restaurando {importProgress.type}
+            </h3>
+            <p className="text-slate-500 text-sm mb-6">
+              Por favor, aguarde. Importando item {importProgress.current} de {importProgress.total}.
+            </p>
+            <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+              <motion.div 
+                className="bg-indigo-600 h-full"
+                initial={{ width: 0 }}
+                animate={{ width: `${(importProgress.current / importProgress.total) * 100}%` }}
+              />
+            </div>
+          </motion.div>
+        </div>
+      )}
+    </AnimatePresence>
+  );
+
+  if (userStatus === 'pending' || userStatus === 'disabled') {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="bg-white p-12 rounded-[40px] shadow-2xl border border-slate-200 max-w-lg w-full text-center"
+        >
+          <div className={`w-20 h-20 rounded-3xl flex items-center justify-center mx-auto mb-8 shadow-xl ${userStatus === 'pending' ? 'bg-orange-50 text-orange-600 shadow-orange-100' : 'bg-red-50 text-red-600 shadow-red-100'}`}>
+            <Icon name={userStatus === 'pending' ? "Loader2" : "ShieldCheck"} size={40} className={userStatus === 'pending' ? "animate-spin" : ""} />
+          </div>
+          <h2 className="text-2xl font-black text-slate-900 mb-4 tracking-tight">
+            {userStatus === 'pending' ? "Aguardando Aprovação" : "Acesso Desabilitado"}
+          </h2>
+          <p className="text-slate-500 mb-10 leading-relaxed">
+            {userStatus === 'pending' 
+              ? "Seu perfil foi criado com sucesso, mas ainda precisa ser aprovado por um administrador master da CMC para liberar o acesso ao sistema."
+              : "Seu acesso ao sistema foi desabilitado por um administrador. Entre em contato com a Diretoria de Contratações se considerar isso um erro."}
+          </p>
+          <button 
+            onClick={handleLogout}
+            className="w-full bg-slate-100 text-slate-600 py-4 rounded-2xl font-bold hover:bg-slate-200 transition-all"
+          >
+            Sair da Conta
+          </button>
+        </motion.div>
+      </div>
+    );
+  }
+
+  const renderDashboard = () => {
+    const inProgress = sortedDrafts.filter(d => d.status !== 'completed');
+    const completed = sortedDrafts.filter(d => d.status === 'completed');
+
+    const ETPList = ({ items, type }: { items: any[], type: 'in_progress' | 'completed' }) => (
+      <div className="bg-white rounded-[32px] border border-slate-200 overflow-hidden shadow-sm">
+        {items.length === 0 ? (
+          <div className="py-12 text-center">
+            <p className="text-slate-400 font-bold text-sm uppercase tracking-widest">Nenhum documento {type === 'in_progress' ? 'em edição' : 'concluído'}</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-100">
+                  <th className="px-3 sm:px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-left">Tipo / Título</th>
+                  <th className="px-3 sm:px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-left">Atualização</th>
+                  <th className="px-3 sm:px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Ações</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {items.map(draft => {
+                  const isDFD = draft.documentType === 'dfd' || draft.data?.diag_area_requisitante !== undefined;
+                  return (
+                    <motion.tr 
+                      key={draft.id}
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className="hover:bg-slate-50/50 transition-all group"
+                    >
+                      <td className="px-3 sm:px-6 py-4">
+                        <div className="flex items-center gap-2 sm:gap-3">
+                          <div className={`p-2 rounded-xl shrink-0 ${isDFD ? 'bg-teal-50 text-teal-700' : (type === 'in_progress' ? 'bg-indigo-50 text-indigo-600' : 'bg-green-50 text-green-600')}`}>
+                            <Icon name="FileText" size={16} />
+                          </div>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 mb-0.5">
+                              <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-md ${isDFD ? 'bg-teal-100 text-teal-800' : 'bg-indigo-100 text-indigo-800'}`}>
+                                {isDFD ? 'DFD' : 'ETP'}
+                              </span>
+                            </div>
+                            <h4 className="font-bold text-slate-900 text-[11px] sm:text-sm break-words whitespace-normal">
+                              {isDFD ? (draft.data?.dfd_name || draft.title || (draft.data?.diag_area_requisitante ? `DFD - ${draft.data.diag_area_requisitante}` : 'DFD')) : (draft.title || 'ETP')}
+                            </h4>
+                            <p className="text-[9px] sm:text-[10px] text-slate-400 font-medium italic truncate">ID: {draft.id}</p>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-3 sm:px-6 py-4 shrink-0">
+                        <p className="text-[10px] sm:text-xs font-medium text-slate-600 whitespace-nowrap">
+                          {draft.updatedAt?.toDate ? draft.updatedAt.toDate().toLocaleDateString('pt-BR') : 'Recentemente'}
+                        </p>
+                        <p className="text-[9px] sm:text-[10px] text-slate-400 font-bold whitespace-nowrap">
+                          {draft.updatedAt?.toDate ? draft.updatedAt.toDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : ''}
+                        </p>
+                      </td>
+                      <td className="px-3 sm:px-6 py-4">
+                        <div className="flex items-center justify-end gap-1.5 sm:gap-2 text-right">
+                          {type === 'in_progress' ? (
+                            <>
+                              <button 
+                                onClick={() => toggleETPStatus(draft.id, 'in_progress')}
+                                className="px-2 sm:px-4 py-1.5 sm:py-2 bg-indigo-50 text-indigo-600 rounded-lg sm:rounded-xl text-[9px] sm:text-[10px] font-black uppercase hover:bg-indigo-600 hover:text-white transition-all shadow-sm border border-indigo-100 flex items-center gap-1.5 sm:gap-2"
+                                title="Marcar como Concluído"
+                              >
+                                <Icon name="CheckCircle" size={12} /> <span className="hidden sm:inline">Concluir</span>
+                              </button>
+                              <button 
+                                onClick={() => loadDraft(draft, false)}
+                                className="p-1.5 sm:p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all"
+                                title="Editar"
+                              >
+                                <Icon name="Edit3" size={16} />
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button 
+                                onClick={() => toggleETPStatus(draft.id, 'completed')}
+                                className="px-2 sm:px-4 py-1.5 sm:py-2 bg-slate-100 text-slate-600 rounded-lg sm:rounded-xl text-[9px] sm:text-[10px] font-black uppercase hover:bg-slate-800 hover:text-white transition-all shadow-sm flex items-center gap-1.5 sm:gap-2"
+                                title="Reabrir para Edição"
+                              >
+                                <Icon name="Edit3" size={12} /> <span className="hidden sm:inline">Editar</span>
+                              </button>
+                              <button 
+                                onClick={() => loadDraft(draft, false)}
+                                className="p-1.5 sm:p-2 text-slate-400 hover:text-green-600 hover:bg-green-50 rounded-lg transition-all"
+                                title="Visualizar"
+                              >
+                                <Icon name="Eye" size={16} />
+                              </button>
+                            </>
+                          )}
+                          <button 
+                            onClick={() => setDeleteConfirmId(draft.id)}
+                            className="p-1.5 sm:p-2 text-slate-300 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                            title="Excluir"
+                          >
+                            <Icon name="Trash2" size={16} />
+                          </button>
+                        </div>
+                      </td>
+                    </motion.tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+
+    return (
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 py-6 sm:py-12">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-6 mb-8 sm:mb-12">
+          <div>
+            <h2 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">Meus Documentos</h2>
+            <p className="text-slate-500 text-xs sm:text-sm">Gerencie seus rascunhos e documentos finalizados.</p>
+          </div>
+          <div className="flex flex-wrap gap-2 sm:gap-3 w-full sm:w-auto">
+            {userRole === 'master' && (
+              <button 
+                onClick={() => setView('admin')}
+                className="relative bg-slate-800 text-white px-4 sm:px-6 py-2.5 sm:py-3 rounded-xl font-bold text-xs sm:text-sm flex items-center gap-2 hover:bg-black transition-all flex-1 sm:flex-none justify-center"
+              >
+                <Icon name="ShieldCheck" size={18} /> <span className="hidden sm:inline">Painel Master</span><span className="sm:hidden">Master</span>
+                {pendingUsersCount > 0 && (
+                  <span className="absolute -top-1 -right-1 bg-red-600 text-white text-[9px] font-black w-4 h-4 rounded-full flex items-center justify-center shadow-lg border-2 border-white animate-bounce">
+                    {pendingUsersCount}
+                  </span>
+                )}
+              </button>
+            )}
+            <button 
+              onClick={createNewETP}
+              className="bg-indigo-600 text-white px-4 sm:px-6 py-2.5 sm:py-3 rounded-xl font-bold text-xs sm:text-sm flex items-center gap-2 hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200 flex-1 sm:flex-none justify-center"
+            >
+              <Icon name="PlusCircle" size={18} /> <span className="hidden sm:inline">Novo ETP</span><span className="sm:hidden">Em Branco</span>
+            </button>
+
+
+          </div>
+        </div>
+
+        <div className="space-y-12">
+          {/* ETPs em Edição */}
+          <section>
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-10 h-10 rounded-2xl bg-indigo-50 flex items-center justify-center text-indigo-600">
+                <Icon name="Edit3" size={20} />
+              </div>
+              <div>
+                <h3 className="text-lg font-black text-slate-900 leading-tight">Em Edição</h3>
+                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Documentos que você ainda está trabalhando</p>
+              </div>
+            </div>
+            <ETPList items={inProgress} type="in_progress" />
+          </section>
+
+          {/* ETPs Concluídos */}
+          <section>
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-10 h-10 rounded-2xl bg-green-50 flex items-center justify-center text-green-600">
+                <Icon name="CheckCircle" size={20} />
+              </div>
+              <div>
+                <h3 className="text-lg font-black text-slate-900 leading-tight">Concluídos</h3>
+                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Documentos finalizados em modo somente leitura</p>
+              </div>
+            </div>
+            <ETPList items={completed} type="completed" />
+          </section>
+        </div>
+      </div>
+    );
+  };
+
+  const renderAdmin = () => (
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-12">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-6 mb-8 sm:mb-12">
+        <div>
+          <h2 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">Painel Master</h2>
+          <p className="text-slate-500 text-xs sm:text-sm">Visualização global de todos os ETPs e usuários da Câmara.</p>
+        </div>
+        <div className="flex flex-wrap gap-2 w-full sm:w-auto">
+          <button 
+            onClick={() => {
+              notify.test().then(() => {
+                setApiError("Notificação de teste enviada para o Google Chat!");
+                setTimeout(() => setApiError(null), 3000);
+              }).catch(e => setApiError("Erro ao enviar teste: " + e.message));
+            }}
+            className="flex-1 sm:flex-none justify-center bg-green-50 text-green-600 px-3 sm:px-4 py-2.5 sm:py-3 rounded-xl font-bold text-[10px] sm:text-xs flex items-center gap-2 hover:bg-green-100 transition-all border border-green-100"
+            title="Enviar uma mensagem de teste para o Google Chat"
+          >
+            <Icon name="Zap" size={16} /> <span className="hidden sm:inline">Testar Chat</span><span className="sm:hidden">Testar</span>
+          </button>
+          {false && (
+            <>
+              <button 
+                onClick={consolidateUsers}
+                className="flex-1 sm:flex-none justify-center bg-indigo-50 text-indigo-600 px-3 sm:px-4 py-2.5 sm:py-3 rounded-xl font-bold text-[10px] sm:text-xs flex items-center gap-2 hover:bg-indigo-100 transition-all border border-indigo-100"
+                title="Resolver inconsistências e duplicados de e-mail"
+              >
+                <Icon name="Users" size={16} /> <span className="hidden sm:inline">Consolidar</span><span className="sm:hidden">Sincronizar</span>
+              </button>
+              <button 
+                onClick={migrateEtpStatusToInProgress}
+                className="flex-1 sm:flex-none justify-center bg-amber-50 text-amber-600 px-3 sm:px-4 py-2.5 sm:py-3 rounded-xl font-bold text-[10px] sm:text-xs flex items-center gap-2 hover:bg-amber-100 transition-all border border-amber-100"
+                title="Normalizar todos os rascunhos para 'Em Edição'"
+              >
+                <Icon name="RefreshCcw" size={16} /> <span className="hidden sm:inline">Normalizar</span><span className="sm:hidden">Corrigir</span>
+              </button>
+            </>
+          )}
+          <button 
+            onClick={() => setView('dashboard')}
+            className="flex-1 sm:flex-none justify-center bg-slate-100 text-slate-600 px-4 sm:px-6 py-2.5 sm:py-3 rounded-xl font-bold text-[10px] sm:text-xs flex items-center gap-2 hover:bg-slate-200 transition-all"
+          >
+            <Icon name="ChevronDown" size={18} className="rotate-90" /> <span className="hidden sm:inline">Voltar</span><span className="sm:hidden">Sair</span>
+          </button>
+        </div>
+      </div>
+
+      {apiError && (
+        <motion.div 
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="mb-8 p-4 bg-red-50 border border-red-100 rounded-2xl flex items-center gap-3 text-red-600"
+        >
+          <Icon name="AlertTriangle" size={20} />
+          <p className="text-sm font-bold">{apiError}</p>
+          <button onClick={() => setApiError(null)} className="ml-auto p-1 hover:bg-red-100 rounded-lg">
+            <Icon name="X" size={16} />
+          </button>
+        </motion.div>
+      )}
+
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-8">
+        <div className="flex flex-wrap gap-1 bg-slate-100 p-1 rounded-2xl w-full sm:w-fit">
+          <button 
+            onClick={() => setAdminTab('users')}
+            className={`flex-1 sm:flex-none px-4 sm:px-6 py-2 rounded-xl text-[10px] sm:text-xs font-bold transition-all relative ${adminTab === 'users' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            Usuários
+            {pendingUsersCount > 0 && (
+              <span className="absolute -top-1 -right-1 bg-red-600 text-white text-[8px] font-black w-3.5 h-3.5 rounded-full flex items-center justify-center shadow-lg border border-white animate-bounce">
+                {pendingUsersCount}
+              </span>
+            )}
+          </button>
+          <button 
+            onClick={() => setAdminTab('etps')}
+            className={`flex-1 sm:flex-none px-4 sm:px-6 py-2 rounded-xl text-[10px] sm:text-xs font-bold transition-all ${adminTab === 'etps' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            Documentos
+          </button>
+          <button 
+            onClick={() => setAdminTab('trash')}
+            className={`flex-1 sm:flex-none px-4 sm:px-6 py-2 rounded-xl text-[10px] sm:text-xs font-bold transition-all ${adminTab === 'trash' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            Lixeira
+          </button>
+          <button 
+            onClick={() => setAdminTab('settings')}
+            className={`flex-1 sm:flex-none px-4 sm:px-6 py-2 rounded-xl text-[10px] sm:text-xs font-bold transition-all ${adminTab === 'settings' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            Configurações
+          </button>
+        </div>
+
+        {adminTab === 'users' && (
+          <div className="relative w-full sm:w-64">
+            <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
+              <Icon name="Search" size={14} />
+            </div>
+            <input
+              type="text"
+              placeholder="Buscar por nome ou e-mail..."
+              value={userSearch}
+              onChange={(e) => setUserSearch(e.target.value)}
+              className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all shadow-sm"
+            />
+          </div>
+        )}
+      </div>
+
+      {adminTab === 'etps' ? (
+        <div className="bg-white rounded-2xl sm:rounded-[32px] border border-slate-200 overflow-hidden shadow-sm overflow-x-auto">
+          <table className="w-full text-left border-collapse min-w-[600px]">
+            <thead>
+              <tr className="bg-slate-50 border-b border-slate-200">
+                <th 
+                  className="px-3 sm:px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest cursor-pointer hover:text-indigo-600 transition-colors"
+                  onClick={() => toggleEtpSort('title')}
+                >
+                  <div className="flex items-center gap-2">
+                    Título
+                    {etpSort.key === 'title' && (
+                      <Icon name={etpSort.direction === 'asc' ? 'ChevronUp' : 'ChevronDown'} size={14} />
+                    )}
+                  </div>
+                </th>
+                <th 
+                  className="px-3 sm:px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest cursor-pointer hover:text-indigo-600 transition-colors"
+                  onClick={() => toggleEtpSort('userEmail')}
+                >
+                  <div className="flex items-center gap-2">
+                    Autor
+                    {etpSort.key === 'userEmail' && (
+                      <Icon name={etpSort.direction === 'asc' ? 'ChevronUp' : 'ChevronDown'} size={14} />
+                    )}
+                  </div>
+                </th>
+                <th 
+                  className="px-3 sm:px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest cursor-pointer hover:text-indigo-600 transition-colors"
+                  onClick={() => toggleEtpSort('updatedAt')}
+                >
+                  <div className="flex items-center gap-2">
+                    Data
+                    {etpSort.key === 'updatedAt' && (
+                      <Icon name={etpSort.direction === 'asc' ? 'ChevronUp' : 'ChevronDown'} size={14} />
+                    )}
+                  </div>
+                </th>
+                <th className="px-3 sm:px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Ações</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedDrafts.map(draft => (
+                <tr key={draft.id} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                  <td className="px-3 sm:px-6 py-4">
+                    <div className="font-bold text-slate-900 text-xs sm:text-sm line-clamp-1">{draft.title}</div>
+                    <div className="text-[9px] text-slate-400 uppercase">{draft.id}</div>
+                  </td>
+                  <td className="px-3 sm:px-6 py-4">
+                    <div className="text-[11px] sm:text-sm text-slate-600 truncate max-w-[120px]">{draft.userEmail}</div>
+                  </td>
+                  <td className="px-3 sm:px-6 py-4">
+                    <div className="text-[11px] sm:text-sm text-slate-600 whitespace-nowrap">
+                      {getSafeDateString(draft.updatedAt)}
+                      <span className="hidden sm:inline ml-2 text-[10px] text-slate-400">
+                        {getSafeTimeString(draft.updatedAt)}
+                      </span>
+                    </div>
+                  </td>
+                  <td className="px-3 sm:px-6 py-4">
+                    <div className="flex gap-1.5 sm:gap-2">
+                      <button onClick={() => loadDraft(draft, true)} className="p-1.5 sm:p-2 bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100 transition-colors flex items-center gap-2">
+                        <Icon name="Eye" size={14} />
+                        <span className="text-[9px] sm:text-[10px] font-bold uppercase hidden sm:inline">Ver</span>
+                      </button>
+                      <button 
+                        onClick={() => setReassignState({ draftId: draft.id, currentEmail: draft.userEmail || '', title: draft.title || '' })}
+                        className="p-1.5 sm:p-2 bg-slate-50 text-slate-600 rounded-lg hover:bg-slate-100 transition-colors"
+                        title="Reatribuir"
+                      >
+                        <Icon name="Settings" size={14} />
+                      </button>
+                      <button onClick={() => setDeleteConfirmId(draft.id)} className="p-1.5 sm:p-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors">
+                        <Icon name="Trash2" size={14} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : adminTab === 'users' ? (
+        <>
+          <div className="bg-white rounded-2xl sm:rounded-[32px] border border-slate-200 shadow-sm overflow-x-auto">
+            <table className="w-full text-left border-collapse min-w-[600px]">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-200">
+                  <th 
+                    className="px-3 sm:px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest cursor-pointer hover:text-indigo-600 transition-colors"
+                    onClick={() => toggleUserSort('displayName')}
+                  >
+                    <div className="flex items-center gap-2 text-left">
+                      Nome / E-mail
+                      {userSort.key === 'displayName' && (
+                        <Icon name={userSort.direction === 'asc' ? 'ChevronUp' : 'ChevronDown'} size={14} />
+                      )}
+                    </div>
+                  </th>
+                <th 
+                  className="px-3 sm:px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest cursor-pointer hover:text-indigo-600 transition-colors"
+                  onClick={() => toggleUserSort('status')}
+                >
+                  <div className="flex items-center gap-2 text-left">
+                    Status
+                    {userSort.key === 'status' && (
+                      <Icon name={userSort.direction === 'asc' ? 'ChevronUp' : 'ChevronDown'} size={14} />
+                    )}
+                  </div>
+                </th>
+                <th 
+                  className="px-3 sm:px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest cursor-pointer hover:text-indigo-600 transition-colors"
+                  onClick={() => toggleUserSort('role')}
+                >
+                  <div className="flex items-center gap-2 text-left">
+                    Cargo
+                    {userSort.key === 'role' && (
+                      <Icon name={userSort.direction === 'asc' ? 'ChevronUp' : 'ChevronDown'} size={14} />
+                    )}
+                  </div>
+                </th>
+                <th className="px-3 sm:px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Ações</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedUsers.map(u => {
+                
+                return (
+                  <tr key={u.id} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                    <td className="px-3 sm:px-6 py-4">
+                      <div className="flex items-center gap-3">
+                        <div className="relative shrink-0">
+                          <div className="w-8 h-8 sm:w-10 sm:h-10 bg-slate-100 rounded-full flex items-center justify-center text-slate-400 font-bold text-[10px] sm:text-xs uppercase">
+                            {u.displayName?.substring(0, 2) || '??'}
+                          </div>
+                        </div>
+                        <div className="min-w-0">
+                          <div className="font-bold text-slate-900 text-xs sm:text-sm flex items-center gap-2 truncate">
+                            {u.displayName}
+                          </div>
+                          <div className="text-[10px] sm:text-xs text-slate-500 truncate">{u.email}</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-3 sm:px-6 py-4 shrink-0">
+                    <span className={`px-2 sm:px-3 py-1 rounded-full text-[9px] sm:text-[10px] font-black uppercase tracking-widest whitespace-nowrap ${
+                      u.status === 'approved' ? 'bg-green-100 text-green-700' : 
+                      u.status === 'pending' ? 'bg-orange-100 text-orange-700' : 'bg-red-100 text-red-700'
+                    }`}>
+                      {u.status === 'approved' ? 'Aprovado' : u.status === 'pending' ? 'Pendente' : 'Inativo'}
+                    </span>
+                  </td>
+                  <td className="px-3 sm:px-6 py-4 shrink-0">
+                    <select 
+                      value={u.role}
+                      onChange={(e) => updateUserRole(u.id, e.target.value as any)}
+                      className="text-[10px] sm:text-xs font-bold bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 outline-none"
+                    >
+                      <option value="user">Servidor</option>
+                      <option value="master">Master</option>
+                    </select>
+                  </td>
+                  <td className="px-3 sm:px-6 py-4">
+                    <div className="flex flex-wrap gap-1.5 sm:gap-2">
+                      {u.status !== 'approved' && (
+                        <button 
+                          onClick={() => {
+                            updateUserStatus(u.id, 'approved');
+                            notify.approved(u.email, u.displayName || 'Usuário').catch(e => console.warn("Erro ao enviar notificação de aprovação:", e.message));
+                          }}
+                          className="px-2 sm:px-3 py-1.5 bg-green-600 text-white rounded-lg text-[9px] sm:text-[10px] font-bold hover:bg-green-700 transition-all"
+                        >
+                          Ativar
+                        </button>
+                      )}
+                      {u.status === 'approved' && u.role !== 'master' && (
+                        <button 
+                          onClick={() => updateUserStatus(u.id, 'disabled')}
+                          className="px-2 sm:px-3 py-1.5 bg-red-50 text-red-600 rounded-lg text-[9px] sm:text-[10px] font-bold hover:bg-red-100 transition-all whitespace-nowrap"
+                        >
+                          Bloquear
+                        </button>
+                      )}
+                      <button 
+                        onClick={() => setUserToDelete(u)}
+                        className="p-1.5 sm:p-2 text-slate-300 hover:text-red-600 transition-colors"
+                      >
+                        <Icon name="Trash2" size={14} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Ferramentas de Diagnóstico de Acesso */}
+        <div className="mt-12 p-6 sm:p-8 bg-slate-50 border border-slate-200 rounded-[32px]">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-10 h-10 rounded-2xl bg-indigo-100 flex items-center justify-center text-indigo-600">
+              <Icon name="ShieldQuestion" size={20} />
+            </div>
+            <div>
+              <h3 className="text-lg font-black text-slate-900 leading-tight">Diagnóstico de Acesso</h3>
+              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Busca bruta no banco de dados para resolver problemas de login</p>
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-3">
+            <input
+              type="text"
+              placeholder="Digite o e-mail exato para verificar..."
+              value={debugUserEmail}
+              onChange={(e) => setDebugUserEmail(e.target.value)}
+              className="flex-1 px-4 py-3 bg-white border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none shadow-sm"
+            />
+            <button
+              onClick={debugLookupUser}
+              disabled={isDebugSearching || !debugUserEmail}
+              className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-bold text-xs hover:bg-indigo-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              {isDebugSearching ? <Icon name="Loader2" size={16} className="animate-spin" /> : <Icon name="Search" size={16} />}
+              Verificar no Banco
+            </button>
+          </div>
+
+          {debugUserInfo && (
+            <motion.div 
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mt-6 p-4 bg-white border border-slate-200 rounded-2xl shadow-sm"
+            >
+              {debugUserInfo.notFound ? (
+                <div>
+                  <div className="flex items-center gap-3 text-amber-600 mb-4">
+                    <Icon name="UserX" size={20} />
+                    <p className="text-sm font-bold">Nenhum registro encontrado para <strong>{debugUserInfo.email}</strong>.</p>
+                  </div>
+                  <div className="text-[10px] space-y-2">
+                    <p className="font-bold text-slate-500 uppercase tracking-widest">E-mails registrados (Amostra de {debugUserInfo.registeredEmails.length} de {debugUserInfo.totalUsers}):</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {debugUserInfo.registeredEmails.map((u: any) => (
+                        <div key={u.id} className="p-2 bg-slate-50 rounded-lg border border-slate-100 flex justify-between items-center">
+                          <span className="truncate">{u.email}</span>
+                          <span className="text-[8px] bg-slate-200 px-1 rounded uppercase">{u.status}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <div className="flex items-center gap-3 text-green-600 mb-4">
+                    <Icon name="UserCheck" size={20} />
+                    <p className="text-sm font-bold">Encontrado(s) {debugUserInfo.docs.length} registro(s) no banco de dados:</p>
+                  </div>
+                  <div className="space-y-3">
+                    {debugUserInfo.docs.map((d: any) => (
+                      <div key={d.id} className="p-3 bg-slate-50 rounded-xl text-[10px] font-mono border border-slate-100 overflow-x-auto whitespace-pre">
+                        {JSON.stringify(d, null, 2)}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </motion.div>
+          )}
+        </div>
+      </>
+    ) : adminTab === 'settings' ? (
+      <motion.div 
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="bg-white rounded-[32px] border border-slate-200 p-8 shadow-sm max-w-2xl mx-auto w-full"
+      >
+        <div className="flex items-center gap-3 mb-6">
+          <div className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center">
+            <Icon name="Settings2" size={24} />
+          </div>
+          <div>
+            <h3 className="text-xl font-black text-slate-900">Configurações do Sistema</h3>
+            <p className="text-slate-500 text-xs font-bold uppercase tracking-widest">Integrações e Notificações</p>
+          </div>
+        </div>
+
+        <div className="space-y-6">
+          <div>
+            <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 ml-1">
+              Google Chat Webhook URL
+            </label>
+            <div className="relative">
+              <input 
+                type="password"
+                value={systemSettings.chatWebhookUrl || ''}
+                onChange={(e) => setSystemSettings(prev => ({ ...prev, chatWebhookUrl: e.target.value }))}
+                placeholder="https://chat.googleapis.com/v1/spaces/..."
+                className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 text-sm font-medium focus:ring-4 focus:ring-indigo-50 focus:border-indigo-500 transition-all outline-none"
+              />
+              <div className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-300">
+                <Icon name="Zap" size={18} />
+              </div>
+            </div>
+            <p className="mt-2 text-[10px] text-slate-400 font-medium ml-1">
+              Esta URL será usada para enviar notificações de novos registros e ETPs criados.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 ml-1">
+              Chave de API do Gemini (AI)
+            </label>
+            <div className="relative">
+              <input 
+                type="password"
+                value={systemSettings.geminiApiKey || ''}
+                onChange={(e) => setSystemSettings(prev => ({ ...prev, geminiApiKey: e.target.value }))}
+                placeholder="AIzaSy..."
+                className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 text-sm font-medium focus:ring-4 focus:ring-indigo-50 focus:border-indigo-500 transition-all outline-none font-mono"
+              />
+              <div className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-300">
+                <Icon name="Key" size={18} />
+              </div>
+            </div>
+            <p className="mt-2 text-[10px] text-slate-400 font-medium ml-1">
+              Chave usada para as funções de inteligência artificial (assistente de escrita, polimento e extração de documentos) na versão hospedada/produção (ex: GitHub).
+            </p>
+          </div>
+
+          <button 
+            onClick={() => updateSystemSettings(systemSettings)}
+            className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase tracking-widest hover:bg-black transition-all shadow-xl shadow-slate-100 flex items-center justify-center gap-2"
+          >
+            <Icon name="CheckCircle" size={18} /> Salvar Configurações
+          </button>
+
+          <div className="pt-8 border-t border-slate-100">
+            <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4 ml-1">Configuração do Órgão (Nome e Logotipo)</h4>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 ml-1">Nome do Órgão</label>
+                <input 
+                  type="text" 
+                  value={agencyConfig.name}
+                  onChange={(e) => setAgencyConfig(prev => ({ ...prev, name: e.target.value }))}
+                  placeholder="Ex: Câmara Municipal de Curitiba"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-medium outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 ml-1">URL do Logotipo do Órgão</label>
+                <input 
+                  type="text" 
+                  value={agencyConfig.logoUrl}
+                  onChange={(e) => setAgencyConfig(prev => ({ ...prev, logoUrl: e.target.value }))}
+                  placeholder="https://exemplo.com/logo.png"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-medium outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+              </div>
+              <button 
+                onClick={() => saveAgencyConfig(agencyConfig.name, agencyConfig.logoUrl)}
+                className="w-full bg-indigo-600 text-white py-3 rounded-xl font-bold text-xs hover:bg-indigo-700 transition-all shadow-md shadow-indigo-100"
+              >
+                Salvar Identidade do Órgão
+              </button>
+            </div>
+          </div>
+
+          <div className="pt-8 border-t border-slate-100">
+            <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4 ml-1">Backup de Dados (Manual)</h4>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <button 
+                onClick={exportBackup}
+                disabled={isSaving}
+                className="flex items-center justify-center gap-3 bg-white border-2 border-slate-100 p-4 rounded-2xl hover:border-indigo-600 hover:text-indigo-600 transition-all text-slate-600 text-[10px] font-black uppercase tracking-widest"
+              >
+                <div className="w-8 h-8 bg-indigo-50 text-indigo-600 rounded-lg flex items-center justify-center">
+                  <Icon name="Download" size={16} />
+                </div>
+                Exportar Backup JSON
+              </button>
+              <label 
+                className={`flex items-center justify-center gap-3 bg-white border-2 border-slate-100 p-4 rounded-2xl transition-all text-slate-600 text-[10px] font-black uppercase tracking-widest cursor-pointer hover:border-amber-500 hover:text-amber-500 ${isSaving ? 'opacity-50 cursor-not-allowed' : ''}`}
+              >
+                <div className="w-8 h-8 bg-amber-50 text-amber-600 rounded-lg flex items-center justify-center">
+                  <Icon name="RefreshCcw" size={16} />
+                </div>
+                Importar Backup JSON
+                <input type="file" className="hidden" accept=".json" onChange={importBackup} disabled={isSaving} />
+              </label>
+            </div>
+          </div>
+        </div>
+      </motion.div>
+    ) : (
+        <div className="bg-white rounded-2xl sm:rounded-[32px] border border-slate-200 shadow-sm overflow-x-auto">
+          <table className="w-full text-left border-collapse min-w-[600px]">
+            <thead>
+              <tr className="bg-slate-50 border-b border-slate-200">
+                <th 
+                  className="px-3 sm:px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest cursor-pointer hover:text-indigo-600 transition-colors"
+                  onClick={() => toggleEtpSort('title')}
+                >
+                  <div className="flex items-center gap-2 text-left">
+                    Título
+                    {etpSort.key === 'title' && (
+                      <Icon name={etpSort.direction === 'asc' ? 'ChevronUp' : 'ChevronDown'} size={14} />
+                    )}
+                  </div>
+                </th>
+                <th 
+                  className="px-3 sm:px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest cursor-pointer hover:text-indigo-600 transition-colors"
+                  onClick={() => toggleEtpSort('userEmail')}
+                >
+                  <div className="flex items-center gap-2 text-left">
+                    Autor
+                    {etpSort.key === 'userEmail' && (
+                      <Icon name={etpSort.direction === 'asc' ? 'ChevronUp' : 'ChevronDown'} size={14} />
+                    )}
+                  </div>
+                </th>
+                <th 
+                  className="px-3 sm:px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest cursor-pointer hover:text-indigo-600 transition-colors"
+                  onClick={() => toggleEtpSort('deletedAt')}
+                >
+                  <div className="flex items-center gap-2 text-left">
+                    Status
+                    {etpSort.key === 'deletedAt' && (
+                      <Icon name={etpSort.direction === 'asc' ? 'ChevronUp' : 'ChevronDown'} size={14} />
+                    )}
+                  </div>
+                </th>
+                <th className="px-3 sm:px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right px-6">Ações</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedTrash.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="px-3 sm:px-6 py-12 text-center text-slate-400 font-bold italic">
+                    Lixeira vazia.
+                  </td>
+                </tr>
+              ) : (
+                sortedTrash.map(draft => {
+                  const deletedAt = getMillis(draft.deletedAt);
+                  const timeLeft = Math.max(0, 72 * 60 * 60 * 1000 - (Date.now() - deletedAt));
+                  const hoursLeft = Math.floor(timeLeft / (1000 * 60 * 60));
+                  const minsLeft = Math.floor((timeLeft % (1000 * 60 * 60)) / (1000 * 60));
+
+                  return (
+                    <tr key={draft.id} className="border-b border-slate-100 hover:bg-slate-50 transition-colors text-left">
+                      <td className="px-3 sm:px-6 py-4">
+                        <div className="font-bold text-slate-900 text-xs sm:text-sm truncate max-w-[200px]">{draft.title}</div>
+                        <div className="text-[9px] text-slate-400 uppercase italic">ID: {draft.id}</div>
+                      </td>
+                      <td className="px-3 sm:px-6 py-4">
+                        <div className="text-[11px] sm:text-sm text-slate-600 truncate max-w-[120px]">{draft.userEmail}</div>
+                      </td>
+                      <td className="px-3 sm:px-6 py-4">
+                        <div className={`text-[11px] sm:text-sm font-black whitespace-nowrap ${hoursLeft < 2 ? 'text-red-500' : 'text-amber-500'}`}>
+                          {hoursLeft}h {minsLeft}m
+                        </div>
+                      </td>
+                      <td className="px-3 sm:px-6 py-4">
+                        <div className="flex justify-end gap-1.5 sm:gap-2">
+                          <button 
+                            onClick={() => restoreDraft(draft.id)} 
+                            className="flex items-center gap-1 px-2 sm:px-3 py-1.5 bg-green-50 text-green-600 rounded-lg hover:bg-green-100 transition-colors text-[9px] sm:text-[10px] font-black uppercase tracking-widest whitespace-nowrap"
+                          >
+                            <Icon name="PlusCircle" size={12} /> <span className="hidden sm:inline">Restaurar</span>
+                          </button>
+                          <button 
+                            onClick={() => permanentDeleteDraft(draft.id)} 
+                            className="p-1.5 sm:p-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors"
+                            title="Excluir Permanente"
+                          >
+                            <Icon name="Trash2" size={14} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+
+  const renderAbout = () => (
+    <div className="max-w-4xl mx-auto px-4 sm:px-6 py-12">
+      <div className="bg-white rounded-[32px] border border-slate-200 p-8 sm:p-12 shadow-sm text-left">
+        <div className="flex items-center gap-4 mb-8">
+          <div className="w-16 h-16 bg-indigo-600 text-white rounded-3xl flex items-center justify-center shadow-xl shadow-indigo-100">
+            <Icon name="Wand2" size={32} />
+          </div>
+          <div>
+            <h2 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">Sobre o Viabiliza</h2>
+            <p className="text-slate-500 text-xs sm:text-sm">Plataforma de Inteligência para Estudo Técnico Preliminar (ETP) - Lei 14.133/2021</p>
+          </div>
+        </div>
+
+        <div className="space-y-6 text-slate-700 text-sm leading-relaxed">
+          <div className="p-6 bg-slate-50 rounded-2xl border border-slate-100 space-y-3">
+            <h3 className="text-xs font-black text-indigo-600 uppercase tracking-widest">Créditos e Desenvolvimento</h3>
+            <p>
+              O <strong>Viabiliza</strong> foi desenvolvido por <strong>Diego Martins</strong> na <strong>Diretoria de Contratações da Câmara Municipal de Curitiba (CMC)</strong>, com o objetivo de modernizar, dar celeridade e rigor técnico à elaboração de Estudos Técnicos Preliminares (ETP) em conformidade com a Lei Federal nº 14.133/2021.
+            </p>
+            <p className="text-xs text-slate-500 font-bold">
+              Instituição de Origem: Câmara Municipal de Curitiba (CMC).
+            </p>
+          </div>
+
+          <div className="p-6 bg-indigo-50/50 rounded-2xl border border-indigo-100 space-y-3">
+            <h3 className="text-xs font-black text-indigo-700 uppercase tracking-widest">Licenciamento e Uso Público</h3>
+            <p className="text-indigo-900">
+              Este software é distribuído sob a licença <strong>MIT</strong>, sendo <strong>livre para uso não comercial</strong> por qualquer órgão ou entidade da Administração Pública (municipal, estadual ou federal).
+            </p>
+          </div>
+
+          <div className="p-6 bg-slate-50 rounded-2xl border border-slate-100 space-y-3">
+            <h3 className="text-xs font-black text-slate-700 uppercase tracking-widest">Guia Técnico para Implantação em Órgãos Públicos</h3>
+            <p>
+              Equipes técnicas de TI e licitações de outros órgãos públicos que desejem implantar o Viabiliza em sua infraestrutura podem consultar a documentação técnica completa no repositório oficial do projeto. O sistema suporta auto-hospedagem via Docker, banco de dados Firebase Firestore e integração segura com a API do Google Gemini.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-8 pt-6 border-t border-slate-100 flex items-center justify-between">
+          <span className="text-xs font-bold text-slate-400">Versão do Sistema: {SYSTEM_VERSION}</span>
+          <button 
+            onClick={() => setView('dashboard')}
+            className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold text-xs hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100"
+          >
+            Voltar ao Painel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-slate-50">
+      <Modals />
+      
+      {apiError && (
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 pt-4 no-print">
+          <div className="p-4 bg-red-50 border-2 border-red-200 rounded-2xl flex items-start sm:items-center justify-between gap-3 text-red-700 shadow-sm">
+            <div className="flex items-start sm:items-center gap-3">
+              <Icon name="AlertTriangle" size={20} className="shrink-0 mt-0.5 sm:mt-0 text-red-600" />
+              <p className="text-xs sm:text-sm font-bold leading-snug">{apiError}</p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {userRole === 'master' && (apiError.includes("Chave de API") || apiError.includes("Configurações")) && (
+                <button
+                  onClick={() => {
+                    setView('admin');
+                    setAdminTab('settings');
+                    setApiError(null);
+                  }}
+                  className="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-xl text-xs font-black uppercase tracking-wider transition-all"
+                >
+                  Configurar Chave
+                </button>
+              )}
+              <button 
+                onClick={() => setApiError(null)} 
+                className="p-1 hover:bg-red-200 rounded-lg text-red-500"
+                title="Fechar"
+              >
+                <Icon name="X" size={16} />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {view === 'dashboard' ? (
+        <>
+          <header className="bg-white border-b border-slate-200 sticky top-0 z-40 shadow-sm">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+              <div className="flex items-center gap-2 sm:gap-3">
+                {agencyConfig.logoUrl ? (
+                  <img src={agencyConfig.logoUrl} alt="Logo" className="w-8 h-8 rounded-xl object-contain bg-slate-100" />
+                ) : (
+                  <div className="bg-indigo-600 p-2 rounded-xl text-white shadow-lg shrink-0">
+                    <Icon name="Wand2" size={18} />
+                  </div>
+                )}
+                <h1 className="text-sm font-black uppercase tracking-tight truncate">
+                  {agencyConfig.name || 'VIABILIZA'}
+                </h1>
+              </div>
+              <div className="flex items-center gap-2 sm:gap-4">
+                <button onClick={() => setView('about')} className="p-2 text-slate-400 hover:text-indigo-600 transition-colors shrink-0" title="Sobre o Sistema">
+                  <Icon name="Info" size={20} />
+                </button>
+                <div className="text-right hidden md:block shrink-0">
+                  <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{userRole === 'master' ? 'Master' : 'Servidor'}</div>
+                  <div className="text-xs font-bold text-slate-700">{user.displayName}</div>
+                </div>
+                <button onClick={handleLogout} className="p-2 text-slate-400 hover:text-red-600 transition-colors shrink-0" title="Sair">
+                  <Icon name="LogOut" size={20} />
+                </button>
+              </div>
+            </div>
+          </header>
+          {renderDashboard()}
+        </>
+      ) : view === 'about' ? (
+        <>
+          <header className="bg-white border-b border-slate-200 sticky top-0 z-40 shadow-sm">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+              <div className="flex items-center gap-2 sm:gap-3">
+                <div className="bg-indigo-600 p-2 rounded-xl text-white shadow-lg shrink-0">
+                  <Icon name="Info" size={18} />
+                </div>
+                <h1 className="text-sm font-black uppercase tracking-tight truncate">SOBRE O VIABILIZA OS</h1>
+              </div>
+              <button onClick={() => setView('dashboard')} className="p-2 text-slate-400 hover:text-indigo-600 transition-colors shrink-0">
+                <Icon name="X" size={20} />
+              </button>
+            </div>
+          </header>
+          {renderAbout()}
+        </>
+      ) : view === 'admin' ? (
+        <>
+          <header className="bg-white border-b border-slate-200 sticky top-0 z-40 shadow-sm">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+              <div className="flex items-center gap-2 sm:gap-3">
+                <div className="bg-slate-800 p-2 rounded-xl text-white shadow-lg shrink-0">
+                  <Icon name="ShieldCheck" size={18} />
+                </div>
+                <h1 className="text-sm font-black uppercase tracking-tight truncate">ADMINISTRAÇÃO</h1>
+              </div>
+              <button onClick={() => setView('dashboard')} className="p-2 text-slate-400 hover:text-indigo-600 transition-colors shrink-0">
+                <Icon name="X" size={20} />
+              </button>
+            </div>
+          </header>
+          {renderAdmin()}
+        </>
+      ) : (
+        <div className="pb-20 text-slate-900">
+          <header className="bg-white border-b border-slate-200 sticky top-0 z-40 no-print shadow-sm">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-2 overflow-x-auto custom-scrollbar no-print">
+              <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+                <button 
+                  onClick={handleExitEditor} 
+                  className="p-2 hover:bg-slate-100 rounded-xl transition-colors shrink-0"
+                >
+                  <Icon name="ChevronDown" size={20} className="rotate-90 text-slate-400" />
+                </button>
+                <div className="bg-indigo-600 p-1.5 rounded-lg text-white shadow-lg shrink-0">
+                  <Icon name="Wand2" size={16} />
+                </div>
+                <h1 className="text-xs font-black uppercase tracking-tight hidden sm:block">
+                  {isReadOnly ? "VISUALIZAÇÃO / CONSULTA" : "EDITOR DE ETP"}
+                </h1>
+              </div>
+              <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                {!isReadOnly && (
+                  <div className="flex items-center gap-1.5 px-2 py-1 bg-slate-50 rounded-full border border-slate-100 hidden md:flex shrink-0">
+                    <div className={`w-1.5 h-1.5 rounded-full ${isSaving ? 'bg-orange-400 animate-pulse' : 'bg-green-500'}`} />
+                    <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest shrink-0">
+                      {isSaving ? 'Salvando...' : 'Sincronizado'}
+                    </span>
+                  </div>
+                )}
+                {!isReadOnly && (
+                  <button 
+                    onClick={() => saveDraft(true)}
+                    disabled={isSaving}
+                    title="Salvar"
+                    className="px-3 py-2 bg-white border border-slate-200 text-slate-600 rounded-xl text-[10px] font-bold hover:bg-slate-50 transition-all flex items-center gap-1.5 shrink-0"
+                  >
+                    <Icon name="CheckCircle" size={14} className={isSaving ? "animate-pulse text-orange-400" : "text-green-500"} />
+                    <span className="hidden sm:inline">Salvar</span>
+                  </button>
+                )}
+                {isReadOnly && (
+                  <div className="px-3 py-2 bg-amber-50 text-amber-600 rounded-xl text-[9px] font-black uppercase tracking-widest border border-amber-100 flex items-center gap-1.5 shrink-0">
+                    <Icon name="ShieldCheck" size={12} />
+                    <span className="hidden sm:inline">Modo Somente Leitura</span>
+                  </div>
+                )}
+                <button 
+                  onClick={() => setViewMode(viewMode === 'edit' ? 'preview' : 'edit')}
+                  title={viewMode === 'edit' ? 'Visualizar' : 'Editar'}
+                  className="px-3 py-2 bg-slate-100 text-slate-600 rounded-xl text-[10px] font-bold hover:bg-slate-200 transition-all flex items-center gap-1.5 shrink-0"
+                >
+                  <Icon name={viewMode === 'edit' ? 'Eye' : 'Edit3'} size={14} />
+                  <span className="hidden sm:inline">{viewMode === 'edit' ? 'Visualizar' : 'Editar'}</span>
+                </button>
+                <button 
+                  onClick={handleExportDoc}
+                  title="Exportar DOCX"
+                  className="px-3 py-2 bg-indigo-50 text-indigo-600 rounded-xl text-[10px] font-bold hover:bg-indigo-100 transition-all flex items-center gap-1.5 shrink-0"
+                >
+                  <Icon name="FileDown" size={14} />
+                  <span className="hidden sm:inline">DOCX</span>
+                </button>
+                <button 
+                  onClick={handlePrint}
+                  title="Imprimir"
+                  className="px-3 py-2 bg-indigo-600 text-white rounded-xl text-[10px] font-bold hover:bg-indigo-700 transition-all flex items-center gap-1.5 shadow-lg shadow-indigo-100 shrink-0"
+                >
+                  <Icon name="Printer" size={14} />
+                  <span className="hidden sm:inline">Imprimir</span>
+                </button>
+              </div>
+            </div>
+          </header>
+
+          <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-12 no-print">
+            {viewMode === 'edit' ? (
+              <div className="flex flex-col lg:flex-row items-start gap-8">
+              {/* TREE SIDEBAR */}
+              <aside className={`transition-all duration-300 ease-in-out ${sidebarCollapsed ? 'w-12' : 'w-full lg:w-80'} lg:sticky lg:top-28 lg:h-[calc(100vh-140px)] flex flex-col no-print items-stretch shrink-0`}>
+                <div className={`bg-white rounded-3xl border border-slate-200 shadow-sm flex-1 flex flex-col overflow-hidden ${sidebarCollapsed ? 'hidden lg:flex' : 'flex'}`}>
+                  <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+                    {!sidebarCollapsed && <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Estrutura do ETP</h3>}
+                    <button 
+                      onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+                      className="p-1.5 hover:bg-slate-200 rounded-lg text-slate-400 transition-colors"
+                    >
+                      <Icon name={sidebarCollapsed ? "ChevronRight" : "ChevronLeft"} size={16} />
+                    </button>
+                  </div>
+
+                  {!sidebarCollapsed && (
+                    <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                      {/* TAB SWITCHER IN SIDEBAR */}
+                      <div className="flex p-1 bg-slate-100 rounded-xl mb-6">
+                        <button 
+                          onClick={() => setActiveTab('diagnostic')}
+                          className={`flex-1 py-2 text-[10px] font-black uppercase tracking-tight rounded-lg transition-all ${activeTab === 'diagnostic' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+                        >
+                          Diagnóstico
+                        </button>
+                        <button 
+                          onClick={() => isMandatoryFilled() && setActiveTab('technical')}
+                          disabled={!isMandatoryFilled()}
+                          className={`flex-1 py-2 text-[10px] font-black uppercase tracking-tight rounded-lg transition-all ${activeTab === 'technical' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-400 hover:text-slate-600 disabled:opacity-30'}`}
+                        >
+                          Técnico
+                        </button>
+                      </div>
+
+                      <nav className="space-y-4">
+                        {Array.from(new Set(structure.map(s => s.section))).map(section => {
+                          const isDiagnosticSection = section === '0. DIAGNÓSTICO INICIAL';
+                          if (activeTab === 'diagnostic' && !isDiagnosticSection) return null;
+                          if (activeTab === 'technical' && isDiagnosticSection) return null;
+
+                          const sectionItems = structure.filter(s => s.section === section);
+                          const isExpanded = expandedSections.includes(section!);
+
+                          return (
+                            <div key={section} className="space-y-1">
+                              <button 
+                                onClick={() => toggleSection(section!)}
+                                className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-slate-50 text-left group transition-colors"
+                              >
+                                <span className="text-[10px] font-black text-slate-500 uppercase tracking-wider group-hover:text-indigo-600">{section}</span>
+                                <Icon name={isExpanded ? "ChevronDown" : "ChevronRight"} size={12} className="text-slate-300" />
+                              </button>
+                              
+                              {isExpanded && (
+                                <div className="pl-2 space-y-0.5 border-l-2 border-slate-50 ml-2">
+                                  {sectionItems.map(item => (
+                                    <a 
+                                      key={item.id}
+                                      href={`#${item.id}`}
+                                      className="flex items-center gap-2 px-3 py-2 rounded-lg text-[11px] font-bold text-slate-400 hover:bg-indigo-50 hover:text-indigo-600 transition-all"
+                                    >
+                                      <Icon name={item.icon} size={12} />
+                                      <span className="truncate">{item.label}</span>
+                                    </a>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </nav>
+                    </div>
+                  )}
+
+                  {!sidebarCollapsed && (
+                    <div className="p-4 border-t border-slate-100 bg-slate-50/50">
+                      <button 
+                        onClick={() => handleGlobalGenerate()}
+                        disabled={!isMandatoryFilled() || !!isGenerating || isReadOnly}
+                        className={`w-full py-3 rounded-xl font-black uppercase tracking-widest text-[10px] transition-all flex items-center justify-center gap-2 ${isMandatoryFilled() && !isReadOnly ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-100' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}
+                      >
+                        <Icon name="Sparkles" size={14} />
+                        Gerar ETP Completo
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </aside>
+
+              <div className="flex-1 space-y-6 pb-96">
+                {/* STEP INDICATOR */}
+                  <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-4 mb-8 no-print">
+                  <button 
+                    onClick={() => setActiveTab('diagnostic')}
+                    className={`flex items-center gap-2 sm:gap-3 px-4 sm:px-6 py-3 rounded-2xl transition-all ${activeTab === 'diagnostic' ? 'bg-indigo-600 text-white shadow-xl shadow-indigo-100' : 'bg-white text-slate-400 border border-slate-200 hover:border-indigo-200'}`}
+                  >
+                    <div className={`w-5 h-5 sm:w-6 sm:h-6 rounded-full flex items-center justify-center text-[9px] sm:text-[10px] font-black ${activeTab === 'diagnostic' ? 'bg-white text-indigo-600' : 'bg-slate-100 text-slate-400'}`}>1</div>
+                    <span className="text-[10px] sm:text-xs font-black uppercase tracking-widest truncate">Diagnóstico</span>
+                  </button>
+                  <div className="w-6 sm:w-12 h-px bg-slate-200" />
+                  <button 
+                    onClick={() => isMandatoryFilled() && setActiveTab('technical')}
+                    disabled={!isMandatoryFilled()}
+                    className={`flex items-center gap-2 sm:gap-3 px-4 sm:px-6 py-3 rounded-2xl transition-all ${activeTab === 'technical' ? 'bg-indigo-600 text-white shadow-xl shadow-indigo-100' : 'bg-white text-slate-400 border border-slate-200 hover:border-indigo-200 disabled:opacity-50'}`}
+                  >
+                    <div className={`w-5 h-5 sm:w-6 sm:h-6 rounded-full flex items-center justify-center text-[9px] sm:text-[10px] font-black ${activeTab === 'technical' ? 'bg-white text-indigo-600' : 'bg-slate-100 text-slate-400'}`}>2</div>
+                    <span className="text-[10px] sm:text-xs font-black uppercase tracking-widest truncate">Detalhamento Técnico</span>
+                  </button>
+                </div>
+
+                {activeTab === 'diagnostic' ? (
+                  <div className="space-y-6">
+                    {/* ETP NAME FIELD */}
+                    <div className="bg-white rounded-3xl p-8 border border-slate-200 shadow-sm">
+                      <div className="flex items-center gap-4 mb-6">
+                        <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-indigo-100">
+                          <Icon name="Wand2" size={24} />
+                        </div>
+                        <div>
+                          <h2 className="text-xl font-black text-slate-900 tracking-tight">Comece por aqui</h2>
+                          <p className="text-slate-500 text-sm">Dê um nome ao seu projeto e responda ao diagnóstico inicial para liberar a IA.</p>
+                        </div>
+                      </div>
+                      
+                      <label className="flex items-center gap-2 text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">
+                        <Icon name="Edit3" size={14} />
+                        Nome do ETP (Identificação Interna)
+                      </label>
+                      <input 
+                        type="text"
+                        value={formData?.etp_name || ''}
+                        onChange={(e) => setFormData(prev => ({ ...prev, etp_name: e.target.value }))}
+                        disabled={isReadOnly}
+                        placeholder="Ex: Aquisição de Notebooks - TI 2026"
+                        className="w-full bg-slate-50 border border-slate-100 rounded-xl px-4 py-3 text-sm font-bold text-slate-700 focus:bg-white focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100 transition-all outline-none disabled:opacity-60"
+                      />
+                    </div>
+
+                    <div className="bg-white rounded-3xl p-8 border border-slate-200 shadow-sm">
+                      <div className="flex items-center gap-3 mb-8">
+                        <div className="w-10 h-10 rounded-2xl bg-indigo-50 flex items-center justify-center text-indigo-600">
+                          <Icon name="ClipboardList" size={20} />
+                        </div>
+                        <div>
+                          <h2 className="text-xl font-black text-slate-900 tracking-tight">Diagnóstico Inicial</h2>
+                          <p className="text-slate-400 text-[10px] font-bold uppercase tracking-widest">Responda para fundamentar o estudo</p>
+                        </div>
+                      </div>
+
+                      <div className="space-y-8">
+                        {structure.filter(item => item.section === '0. DIAGNÓSTICO INICIAL').map(item => (
+                          <div key={String(item.id)} id={String(item.id)} className="group scroll-mt-24">
+                            <div className="flex justify-between items-start mb-3">
+                              <label className="flex items-center gap-2 text-[11px] font-black text-slate-600 uppercase tracking-tight">
+                                <span className="w-6 h-6 rounded-lg bg-slate-100 flex items-center justify-center text-indigo-600 text-[10px] group-hover:bg-indigo-600 group-hover:text-white transition-all">
+                                  {structure.filter(s => s.section === '0. DIAGNÓSTICO INICIAL').indexOf(item) + 1}
+                                </span>
+                                {item.label}
+                              </label>
+                              {item.examples && (
+                                <button 
+                                  onClick={() => setExamplePopup({ fieldId: String(item.id), examples: item.examples! })}
+                                  className="text-[10px] font-black text-indigo-600 uppercase bg-white border border-indigo-100 px-4 py-2 rounded-xl hover:bg-indigo-50 transition-all shadow-sm flex items-center gap-2"
+                                >
+                                  <Icon name="Lightbulb" size={12} /> Ver Exemplos
+                                </button>
+                              )}
+                            </div>
+                            <textarea 
+                              value={String((formData && formData[item.id]) || '')} 
+                              onChange={(e) => setFormData(prev => ({...prev, [item.id]: e.target.value}))} 
+                              disabled={isReadOnly}
+                              className="textarea-clean min-h-[120px] text-sm font-medium text-slate-600 bg-slate-50/50 border-slate-100 focus:bg-white focus:border-indigo-200 disabled:opacity-60" 
+                              placeholder={item.placeholder}
+                            />
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="mt-12 pt-8 border-t border-slate-100 flex flex-col items-center">
+                        {!isMandatoryFilled() ? (
+                          <div className="text-center space-y-4 max-w-lg mx-auto">
+                            <div className="flex justify-center gap-2">
+                              {[1, 2, 3, 4, 5, 6, 7, 8].map(i => {
+                                const fieldKey = `diag_${['problema_necessidade', 'alternativas_solucao', 'objeto_vigencia', 'exigencias_padroes', 'quantidades_valor', 'parcelamento_providencias', 'correlatas_ambientais', 'riscos_sucesso'][i-1]}` as keyof ETPData;
+                                const isFilled = (String(formData[fieldKey] || '')).trim().length > 10;
+                                return (
+                                  <div 
+                                    key={`dot-${i}`} 
+                                    title={`Pergunta ${i}: ${isFilled ? 'Preenchida' : 'Pendente (> 10 caracteres)'}`}
+                                    className={`w-3 h-3 rounded-full transition-all ${isFilled ? 'bg-green-500 scale-110' : 'bg-slate-300'}`} 
+                                  />
+                                );
+                              })}
+                            </div>
+                            <p className="text-slate-500 text-xs font-bold">
+                              {8 - getMissingMandatoryFields().length} de 8 perguntas do Diagnóstico preenchidas.
+                            </p>
+                            <button
+                              onClick={() => handleGlobalGenerate()}
+                              className="px-6 py-2.5 rounded-xl font-bold text-xs bg-slate-100 text-slate-700 hover:bg-slate-200 transition-all flex items-center gap-2 mx-auto"
+                            >
+                              <Icon name="Info" size={14} className="text-amber-500" />
+                              Ver campos pendentes para liberar a IA
+                            </button>
+                          </div>
+                        ) : (
+                          <motion.button 
+                            initial={{ scale: 0.9, opacity: 0 }}
+                            animate={{ scale: 1, opacity: 1 }}
+                            onClick={() => handleGlobalGenerate()}
+                            disabled={!!isGenerating || isReadOnly}
+                            className={`px-10 py-5 rounded-[32px] font-black uppercase tracking-widest text-sm transition-all flex items-center gap-4 group ${!!isGenerating || isReadOnly ? 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-50' : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-2xl shadow-indigo-200'}`}
+                          >
+                            <div className="bg-white/20 p-2 rounded-xl group-hover:rotate-12 transition-transform">
+                              {isGenerating === 'global' ? (
+                                <Loader2 size={24} className="animate-spin" />
+                              ) : (
+                                <Icon name="Sparkles" size={24} />
+                              )}
+                            </div>
+                            {isGenerating === 'global' ? 'Gerando com IA...' : 'Gerar Estudo Técnico Completo'}
+                          </motion.button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-6">
+                    <div className="flex items-center justify-between px-2">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-2xl bg-slate-800 flex items-center justify-center text-white shadow-lg">
+                          <Icon name="Settings2" size={20} />
+                        </div>
+                        <div>
+                          <h2 className="text-xl font-black text-slate-900 tracking-tight">Campos Obrigatórios</h2>
+                          <p className="text-slate-400 text-[10px] font-bold uppercase tracking-widest">Detalhamento Técnico do Objeto</p>
+                        </div>
+                      </div>
+                      <button 
+                        onClick={() => setActiveTab('diagnostic')}
+                        className="text-[10px] font-black text-indigo-600 uppercase flex items-center gap-2 hover:underline"
+                      >
+                        <Icon name="ArrowLeft" size={12} /> Voltar ao Diagnóstico
+                      </button>
+                    </div>
+
+                    {structure.filter(item => item.section !== '0. DIAGNÓSTICO INICIAL' && !['responsavel'].includes(String(item.id))).map(item => (
+                      <div key={String(item.id)} id={String(item.id)} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden scroll-mt-24 transition-all hover:shadow-md">
+                        <div className="px-6 py-4 bg-slate-50 border-b flex justify-between items-center">
+                          <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-lg bg-white border border-slate-200 flex items-center justify-center text-indigo-600">
+                              <Icon name={item.icon} size={16} />
+                            </div>
+                            <div>
+                              <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-600">{item.label}</h3>
+                              {item.instruction && <p className="text-[9px] text-slate-400 font-medium uppercase mt-0.5">{item.instruction}</p>}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {['tabela_riscos_interna', 'tabela_riscos_externa'].includes(String(item.id)) && (
+                              <div className="flex items-center gap-2 mr-2">
+                                <span className="text-[9px] font-black text-slate-400 uppercase">Incluir no documento?</span>
+                                <button
+                                  onClick={() => setFormData(prev => ({
+                                    ...prev,
+                                    [item.id === 'tabela_riscos_interna' ? 'include_riscos_interna' : 'include_riscos_externa']: !prev[item.id === 'tabela_riscos_interna' ? 'include_riscos_interna' : 'include_riscos_externa']
+                                  }))}
+                                  className={`w-10 h-5 rounded-full transition-all relative ${formData[item.id === 'tabela_riscos_interna' ? 'include_riscos_interna' : 'include_riscos_externa'] ? 'bg-indigo-600' : 'bg-slate-200'}`}
+                                >
+                                  <div className={`absolute top-1 w-3 h-3 rounded-full bg-white transition-all ${formData[item.id === 'tabela_riscos_interna' ? 'include_riscos_interna' : 'include_riscos_externa'] ? 'left-6' : 'left-1'}`} />
+                                </button>
+                              </div>
+                            )}
+                            {item.helpText && (
+                              <button 
+                                onClick={() => setHelpPopup({ title: item.label, content: item.helpText! })}
+                                className="text-[9px] font-black text-amber-900 uppercase bg-yellow-100 border border-yellow-200 px-3 py-1.5 rounded-full hover:bg-yellow-200 flex items-center gap-2 shadow-sm transition-all animate-pulse"
+                              >
+                                <span className="text-[12px]">⚠️</span>
+                                Ajuda
+                              </button>
+                            )}
+                            {item.isAiEnabled !== false && !isReadOnly && (
+                              <button 
+                                onClick={() => handleAiAssist(item.id as ETPField)} 
+                                disabled={isGenerating !== null} 
+                                className="text-[9px] font-black text-indigo-600 uppercase bg-white border border-indigo-100 px-3 py-1.5 rounded-full hover:bg-indigo-50 flex items-center gap-2 shadow-sm transition-all disabled:opacity-50"
+                              >
+                                {isGenerating === item.id ? <Loader2 size={10} className="animate-spin" /> : <Icon name="Sparkles" size={10} />}
+                                Refinar com IA
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        <div className="p-6">
+                          {['tabela_estimativa_quantitativos_precos', 'tabela_riscos_interna', 'tabela_riscos_externa'].includes(String(item.id)) ? (
+                            <div className={`transition-opacity ${(['tabela_riscos_interna', 'tabela_riscos_externa'].includes(String(item.id)) && !formData[item.id === 'tabela_riscos_interna' ? 'include_riscos_interna' : 'include_riscos_externa']) ? 'opacity-50' : 'opacity-100'}`}>
+                              <HtmlTableEditor 
+                                value={String((formData && formData[item.id]) || '')} 
+                                onChange={(newContent) => setFormData(prev => ({...prev, [item.id]: newContent}))} 
+                                placeholder="Utilize a barra de ferramentas para compor a tabela ou clique em 'Tabela Modelo' para restaurar um escopo padrão..."
+                                fieldId={String(item.id)}
+                                readOnly={isReadOnly}
+                              />
+                            </div>
+                          ) : item.id === 'fotos' ? (
+                            <FileUploader 
+                              value={(formData && formData[item.id]) || ''} 
+                              onChange={(value) => setFormData(prev => ({...prev, [item.id]: value}))} 
+                              readOnly={isReadOnly}
+                            />
+                          ) : item.id === 'data_documento' ? (
+                            <input 
+                              type="date"
+                              value={String((formData && formData[item.id]) || '')} 
+                              onChange={(e) => setFormData(prev => ({...prev, [item.id]: e.target.value}))} 
+                              disabled={isReadOnly}
+                              className="w-full p-4 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all disabled:opacity-60"
+                            />
+                          ) : (
+                            <textarea 
+                              value={String((formData && formData[item.id]) || '')} 
+                              onChange={(e) => setFormData(prev => ({...prev, [item.id]: e.target.value}))} 
+                              disabled={isReadOnly}
+                              className="textarea-clean min-h-[120px] text-sm resize-y focus:min-h-[250px] transition-all duration-300 disabled:opacity-60" 
+                              placeholder={item.placeholder || "Preencha aqui..."}
+                            />
+                          )}
+                        </div>
+                      </div>
+                    ))}
+
+                    <div className="flex justify-center py-8">
+                      <button 
+                        onClick={() => handleGlobalGenerate()}
+                        disabled={!!isGenerating || isReadOnly}
+                        className={`bg-indigo-600 text-white px-8 py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all shadow-xl flex items-center gap-3 ${isReadOnly ? 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-50' : 'hover:bg-indigo-700 shadow-indigo-200'}`}
+                      >
+                        {isGenerating === 'global' ? <Loader2 size={20} className="animate-spin" /> : <Icon name="Sparkles" size={20} />}
+                        Regerar Estudo Completo
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+            ) : (
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                style={{ fontFamily: 'Arial, sans-serif' }}
+                className="bg-white shadow-2xl p-16 border border-slate-200 max-w-4xl mx-auto etp-doc rounded-3xl"
+              >
+                <div className="text-center mb-12 border-b-2 border-black pb-8">
+                  <h1 className="text-xl font-bold uppercase underline">Estudo Técnico Preliminar (ETP)</h1>
+                  <p className="text-xs font-bold mt-2">Câmara Municipal de Curitiba</p>
+                </div>
+                
+                <div className="mb-8">
+                  <h3 className="text-lg font-black text-indigo-600 mb-4 border-b-2 border-indigo-100 pb-2">I - INFORMAÇÕES GERAIS</h3>
+                  <p className="text-xs font-black text-slate-500 uppercase tracking-widest mb-4">1. IDENTIFICAÇÃO DO PROCESSO E ÁREA REQUISITANTE</p>
+                  <div className="p-6 border border-slate-200 rounded-2xl bg-slate-50 shadow-sm">
+                    <div className="grid grid-cols-2 gap-8">
+                      <div>
+                        <span className="text-[10px] font-black uppercase text-slate-400 block tracking-widest mb-1">Nº Processo SPAE</span>
+                        <span className="text-sm font-bold text-slate-700">{formData.processo_spae || '---'}</span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] font-black uppercase text-slate-400 block tracking-widest mb-1">Área Demandante</span>
+                        <span className="text-sm font-bold text-slate-700">{formData.unidade_requisitante || '---'}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {Object.entries(structure
+                  .filter(s => !['responsavel'].includes(String(s.id)))
+                  .filter(s => s.section !== '0. DIAGNÓSTICO INICIAL')
+                  .filter(s => s.section !== 'VII - ASSINATURAS')
+                  .filter(s => !['unidade_requisitante', 'processo_spae'].includes(String(s.id)))
+                  .filter(s => s.id !== 'tabela_riscos_interna' || (formData && formData.include_riscos_interna))
+                  .filter(s => s.id !== 'tabela_riscos_externa' || (formData && formData.include_riscos_externa))
+                  .reduce((acc, item) => {
+                  const section = item.section || 'Outros';
+                  if (!acc[section]) acc[section] = [];
+                  acc[section].push(item);
+                  return acc;
+                }, {} as Record<string, ETPStructureItem[]>)).map(([section, items]) => (
+                  <div key={section} className="mb-12">
+                    <h3 className="text-lg font-black text-indigo-600 mb-6 border-b-2 border-indigo-100 pb-2">{section}</h3>
+                    {items.map(item => {
+                      const content = formData[item.id];
+                      if (item.id === 'fotos' && !content) return null;
+
+                      return (
+                        <div key={item.id} className="mb-8">
+                          <h4 className="text-xs font-bold uppercase text-slate-500 mb-2">{item.label}</h4>
+                          {['tabela_estimativa_quantitativos_precos', 'tabela_riscos_interna', 'tabela_riscos_externa'].includes(String(item.id)) ? (
+                            <div 
+                              className="tiptap-content text-sm text-slate-700"
+                              dangerouslySetInnerHTML={{ __html: String(content || "Pendente.") }} 
+                            />
+                          ) : item.id === 'fotos' ? (
+                            <div className="grid grid-cols-2 gap-4 mt-4">
+                              {(() => {
+                                try {
+                                  const images = JSON.parse(String(content || '[]'));
+                                  return images.map((img: string, idx: number) => (
+                                    <img key={idx} src={img} className="w-full rounded-xl border border-slate-200" referrerPolicy="no-referrer" />
+                                  ));
+                                } catch (e) {
+                                  return <p className="text-xs text-red-500 italic">Erro ao carregar imagens.</p>;
+                                }
+                              })()}
+                            </div>
+                          ) : (
+                            <p className="text-sm text-justify leading-relaxed text-slate-700 whitespace-pre-wrap">
+                              {content || "Pendente."}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+
+                <div className="mt-16 text-center text-sm font-bold text-slate-500 mb-12">
+                  Curitiba, {formatDateLong(formData.data_documento)}
+                </div>
+                <div className="grid grid-cols-2 gap-8">
+                  {(formData.assinaturas || "")
+                    .split('\n')
+                    .map(line => line.trim())
+                    .filter(line => line.length > 0)
+                    .map((line, idx) => {
+                      const [name, dept] = line.split(',').map(s => s.trim());
+                      return (
+                        <div key={idx} className="pt-2 text-center">
+                          <p className="text-xs font-black uppercase">{name || ""}</p>
+                          <p className="text-[10px] text-slate-500 font-bold uppercase">{dept || ""}</p>
+                        </div>
+                      );
+                    })}
+                </div>
+              </motion.div>
+            )}
+          </main>
+
+          <div className="print-only etp-doc" style={{ fontFamily: 'Arial, sans-serif' }}>
+            <div style={{textAlign: 'center', marginBottom: '40px', borderBottom: '2px solid black', paddingBottom: '20px'}}>
+              <h1 style={{fontSize: '16pt', fontWeight: 'bold', textTransform: 'uppercase'}}>Estudo Técnico Preliminar</h1>
+              <p style={{fontSize: '10pt'}}>Administração Pública Direta e Indireta - Lei 14.133/21</p>
+            </div>
+            {structure
+              .filter(item => item.id !== 'assinaturas')
+              .filter(s => s.id !== 'tabela_riscos_interna' || (formData && formData.include_riscos_interna))
+              .filter(s => s.id !== 'tabela_riscos_externa' || (formData && formData.include_riscos_externa))
+              .map(item => {
+              const content = formData[item.id];
+              if (item.id === 'fotos' && !content) return null;
+
+              return (
+                <div key={item.id} style={{marginBottom: '25px'}}>
+                  <h2 style={{fontSize: '12pt', fontWeight: 'bold', textTransform: 'uppercase', borderBottom: '1px solid black', marginTop: '15pt', paddingBottom: '3pt'}}>{item.label}</h2>
+                  {['tabela_estimativa_quantitativos_precos', 'tabela_riscos_interna', 'tabela_riscos_externa'].includes(String(item.id)) ? (
+                    <div 
+                      className="tiptap-content"
+                      style={{ fontSize: '11pt' }}
+                      dangerouslySetInnerHTML={{ __html: String(content || "Não informado.") }} 
+                    />
+                  ) : item.id === 'fotos' ? (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginTop: '10px' }}>
+                      {(() => {
+                        try {
+                          const images = JSON.parse(String(content || '[]'));
+                          return images.map((img: string, idx: number) => (
+                            <img key={idx} src={img} style={{ width: '100%', borderRadius: '8px', border: '1px solid #ccc' }} referrerPolicy="no-referrer" />
+                          ));
+                        } catch (e) {
+                          return null;
+                        }
+                      })()}
+                    </div>
+                  ) : (
+                    <p style={{fontSize: '11pt', textAlign: 'justify', marginBottom: '10pt', lineHeight: '1.5', whiteSpace: 'pre-wrap'}}>
+                      {content || "Não informado."}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '40px', marginTop: '60px' }}>
+              {(formData.assinaturas || "")
+                .split('\n')
+                .map(line => line.trim())
+                .filter(line => line.length > 0)
+                .map((line, idx) => {
+                  const [name, dept] = line.split(',').map(s => s.trim());
+                  return (
+                    <div key={idx} style={{ borderTop: 'none', paddingTop: '8px', textAlign: 'center', fontSize: '10pt' }}>
+                      <strong>{(name || "").toUpperCase()}</strong><br/>
+                      {dept || ""}
+                    </div>
+                  );
+                })}
+            </div>
+            <div style={{ marginTop: '40px', textAlign: 'center', fontSize: '11pt' }}>
+              Curitiba, ____ de ____________ de 202_.
+            </div>
+          </div>
+
+          <AnimatePresence>
+            {isGenerating === 'global' && (
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 no-print"
+              >
+                <motion.div 
+                  initial={{ scale: 0.9, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.9, opacity: 0 }}
+                  className="bg-white p-10 rounded-3xl shadow-2xl text-center max-w-xs"
+                >
+                  <Loader2 size={40} className="mx-auto mb-4 text-indigo-600 animate-spin" />
+                  <h3 className="font-black text-slate-800 uppercase tracking-tighter text-lg">Consolidando</h3>
+                  <p className="text-slate-500 text-xs font-medium">Refinando rascunhos com IA...</p>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      )}
+      
+      <footer className="py-6 text-center no-print border-t border-slate-100 bg-slate-50/50">
+        <p className="text-[10px] text-slate-400 font-medium tracking-tight uppercase">
+          Desenvolvido pela Diretoria de Contratações da Câmara Municipal de Curitiba • Versão {SYSTEM_VERSION}
+        </p>
+      </footer>
+    </div>
+  );
+}

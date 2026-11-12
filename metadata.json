@@ -1,0 +1,8 @@
+{
+  "name": "Viabiliza",
+  "description": "Plataforma de inteligência para elaboração de Estudo Técnico Preliminar (ETP)",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

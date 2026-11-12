@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  viabiliza-os:
+    build: .
+    image: viabiliza-os:latest
+    container_name: viabiliza-os
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - GEMINI_API_KEY=sua_chave_gemini_aqui
+      - VITE_GOOGLE_CHAT_WEBHOOK_URL=sua_url_webhook_opcional
+    networks:
+      - viabiliza-net
+
+networks:
+  viabiliza-net:
+    driver: bridge
