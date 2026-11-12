@@ -9,7 +9,50 @@ dotenv.config();
 const app = express();
 const PORT = 3000;
 
+app.disable("x-powered-by");
 app.use(express.json({ limit: "15mb" }));
+
+// --- Security: protect AI generation endpoints ---
+const AI_RATE_LIMIT = 10;
+const AI_RATE_WINDOW_MS = 60 * 1000;
+const aiRateMap = new Map<string, { count: number; resetAt: number }>();
+
+const verifyAiAuth = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!token) {
+    return res.status(401).json({ error: "Token de autenticação ausente." });
+  }
+  try {
+    const tokenRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?token=${encodeURIComponent(token)}`);
+    const tokenData: any = await tokenRes.json().catch(() => null);
+    const uid = tokenData?.user_id;
+    if (!uid) {
+      return res.status(401).json({ error: "Token inválido ou expirado." });
+    }
+    (req as any).user = { uid };
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: "Falha na validação do token de autenticação." });
+  }
+};
+
+const aiRateLimiter = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const key = (req as any).user?.uid || req.ip || "unknown";
+  const now = Date.now();
+  const entry = aiRateMap.get(key);
+  if (!entry || entry.resetAt < now) {
+    aiRateMap.set(key, { count: 1, resetAt: now + AI_RATE_WINDOW_MS });
+    return next();
+  }
+  entry.count += 1;
+  if (entry.count > AI_RATE_LIMIT) {
+    return res.status(429).json({ error: "Muitas requisições de IA. Aguarde alguns instantes antes de continuar." });
+  }
+  return next();
+};
+
+app.use("/api/ai", verifyAiAuth, aiRateLimiter);
 
 const SYSTEM_PROMPT = `Você é um Especialista em Contratações Públicas da Câmara Municipal de Curitiba (CMC), com profundo conhecimento da Lei 14.133/2021.
 Sua tarefa é elaborar ou revisar seções de um Estudo Técnico Preliminar (ETP) seguindo RIGOROSAMENTE as diretrizes abaixo:
@@ -77,7 +120,9 @@ const TABLE_TEMPLATES = {
   `
 };
 
-// Helper function to initialize Gemini API with custom or environment key
+// Helper function to initialize Gemini API.
+// Global secret (server-side GEMINI_API_KEY) is the default for all users;
+// a per-user key (customKey) can override it when the TI team enables per-user keys.
 const getAiClient = (customKey?: string) => {
   const apiKey = (customKey && customKey.trim().length > 10) ? customKey.trim() : process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey.trim().length < 10) {
@@ -153,8 +198,14 @@ app.get("/api/health", (req, res) => {
 // 1. EXTRACT DOCUMENT ENDPOINT
 app.post("/api/ai/extract-doc", async (req, res) => {
   const { text, isTruncated, customApiKey } = req.body;
-  if (!text) {
+  if (!text || typeof text !== "string") {
     return res.status(400).json({ error: "O texto do documento é obrigatório." });
+  }
+  if (text.length > 50000) {
+    return res.status(400).json({ error: "O texto do documento excede o tamanho máximo permitido (50.000 caracteres)." });
+  }
+  if (isTruncated !== undefined && typeof isTruncated !== "boolean") {
+    return res.status(400).json({ error: "O parâmetro 'isTruncated' deve ser um booleano." });
   }
 
   try {
@@ -198,6 +249,22 @@ app.post("/api/ai/assist", async (req, res) => {
   
   if (!fieldId || !fieldName || !formData) {
     return res.status(400).json({ error: "Parâmetros 'fieldId', 'fieldName' e 'formData' são obrigatórios." });
+  }
+  if (typeof instruction === "string" && instruction.length > 5000) {
+    return res.status(400).json({ error: "A instrução do assistente deve ter no máximo 5.000 caracteres." });
+  }
+  if (formData && typeof formData === "object") {
+    const diagFields = [
+      "diag_problema_necessidade", "diag_alternativas_solucao", "diag_objeto_vigencia",
+      "diag_exigencias_padroes", "diag_quantidades_valor", "diag_parcelamento_providencias",
+      "diag_correlatas_ambientais", "diag_riscos_sucesso"
+    ];
+    for (const f of diagFields) {
+      const v = (formData as any)[f];
+      if (typeof v === "string" && v.length > 20000) {
+        return res.status(400).json({ error: `O campo de diagnóstico '${f}' excede o tamanho máximo permitido.` });
+      }
+    }
   }
 
   try {
@@ -246,6 +313,18 @@ app.post("/api/ai/assist", async (req, res) => {
 // 3. GLOBAL GENERATION ENDPOINT
 app.post("/api/ai/generate-global", async (req, res) => {
   const { diag_problema_necessidade, diag_alternativas_solucao, diag_objeto_vigencia, diag_exigencias_padroes, diag_quantidades_valor, diag_parcelamento_providencias, diag_correlatas_ambientais, diag_riscos_sucesso, customApiKey } = req.body;
+
+  const MAX_DIAG_LENGTH = 20000;
+  const diagFields = [
+    "diag_problema_necessidade", "diag_alternativas_solucao", "diag_objeto_vigencia", "diag_exigencias_padroes",
+    "diag_quantidades_valor", "diag_parcelamento_providencias", "diag_correlatas_ambientais", "diag_riscos_sucesso"
+  ];
+  for (const f of diagFields) {
+    const v = (req.body as any)[f];
+    if (typeof v === "string" && v.length > MAX_DIAG_LENGTH) {
+      return res.status(400).json({ error: `O campo '${f}' excede o tamanho máximo permitido (${MAX_DIAG_LENGTH} caracteres).` });
+    }
+  }
 
   try {
     const ai = getAiClient(customApiKey);
@@ -406,8 +485,18 @@ app.post("/api/ai/generate-global", async (req, res) => {
 // 4. GENERATE DFD ENDPOINT
 app.post("/api/ai/generate-dfd", async (req, res) => {
   const { formData, customApiKey } = req.body;
+  const MAX_DIAG_LENGTH = 20000;
   if (!formData) {
     return res.status(400).json({ error: "Dados do formulário DFD são obrigatórios." });
+  }
+  if (formData && typeof formData === "object") {
+    const dfdFields = ["dfd_necessidade", "dfd_alinhamento", "dfd_descricao", "dfd_requisitos", "dfd_estimativas", "dfd_cronograma"];
+    for (const f of dfdFields) {
+      const v = (formData as any)[f];
+      if (typeof v === "string" && v.length > MAX_DIAG_LENGTH) {
+        return res.status(400).json({ error: `O campo '${f}' excede o tamanho máximo permitido (${MAX_DIAG_LENGTH} caracteres).` });
+      }
+    }
   }
 
   try {

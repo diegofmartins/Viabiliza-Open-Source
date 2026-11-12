@@ -32,7 +32,7 @@ service cloud.firestore {
       allow get: if isAuthenticated() && (request.auth.uid == uid || isDefaultMaster() || isMaster());
       allow list: if isDefaultMaster() || isMaster();
       allow create: if isAuthenticated() && request.auth.uid == uid;
-      allow update: if isAuthenticated() && (request.auth.uid == uid || isDefaultMaster() || isMaster());
+      allow update: if isMaster() || (isAuthenticated() && request.auth.uid == uid && request.resource.data.role == 'user');
       allow delete: if isAuthenticated() && (
         isDefaultMaster() || isMaster() || 
         (resource.data.email.lower() == request.auth.token.email.lower())
@@ -47,8 +47,13 @@ service cloud.firestore {
     }
 
     match /config/system {
-      allow read: if isAuthenticated();
-      allow write: if isDefaultMaster() || isMaster();
+      allow read: if isMaster();
+      allow write: if isMaster();
+    }
+
+    match /settings/{docId} {
+      allow read: if isMaster();
+      allow write: if isMaster();
     }
 
     match /test/connection {
