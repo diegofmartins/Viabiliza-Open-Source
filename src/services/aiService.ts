@@ -1,6 +1,16 @@
 import { ETPData, ETPField } from "../types";
 
 /**
+ * URL base do backend de IA (opcional).
+ * Quando o frontend e servido pelo proprio backend (mesmo dominio), fica vazio.
+ * No GitHub Pages (hospedagem estatica) defina VITE_AI_API_URL com a URL publica
+ * do servidor, por exemplo: https://viabiliza-api.seu-orgao.gov.br
+ */
+const AI_API_BASE = (import.meta.env.VITE_AI_API_URL || "").replace(/\/+$/, "");
+const aiUrl = (path: string) => `${AI_API_BASE}${path}`;
+
+
+/**
  * 1. AI Assist for a single field via server backend
  */
 export async function requestAiAssist(params: {
@@ -12,7 +22,7 @@ export async function requestAiAssist(params: {
 }): Promise<string> {
   const { fieldId, fieldName, instruction, formData, customApiKey } = params;
 
-  const res = await fetch("/api/ai/assist", {
+  const res = await fetch(aiUrl("/api/ai/assist"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -45,7 +55,7 @@ export async function requestAiGenerateGlobal(params: {
 }): Promise<Partial<ETPData>> {
   const { formData, customApiKey } = params;
 
-  const res = await fetch("/api/ai/generate-global", {
+  const res = await fetch(aiUrl("/api/ai/generate-global"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

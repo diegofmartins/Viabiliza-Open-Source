@@ -39,6 +39,9 @@ jobs:
           # Deriva o caminho base do nome do repositorio, evitando quebrar
           # os arquivos (assets) quando o repositorio e renomeado.
           BASE_PATH: /${{ github.event.repository.name }}/
+          # URL do backend de IA (opcional). Configure em Settings > Variables
+          # quando o frontend estatico precisar chamar um servidor separado.
+          VITE_AI_API_URL: ${{ vars.VITE_AI_API_URL }}
         run: |
           npm run build
           cp dist/index.html dist/404.html
