@@ -1,5 +1,6 @@
 import { ETPData, ETPField } from "../types";
 import { auth } from "../firebase";
+import { IS_DEMO, DEMO_AI_MESSAGE } from "../demo/config";
 
 /**
  * URL base do backend de IA (opcional).
@@ -39,6 +40,9 @@ export async function requestAiAssist(params: {
   formData: ETPData;
   customApiKey?: string;
 }): Promise<string> {
+  if (IS_DEMO) {
+    return DEMO_AI_MESSAGE;
+  }
   const { fieldId, fieldName, instruction, formData, customApiKey } = params;
 
   const res = await fetch(aiUrl("/api/ai/assist"), {
@@ -72,6 +76,9 @@ export async function requestAiGenerateGlobal(params: {
   formData: ETPData;
   customApiKey?: string;
 }): Promise<Partial<ETPData>> {
+  if (IS_DEMO) {
+    return { status: 'in_progress' }; // Return minimal data or error state
+  }
   const { formData, customApiKey } = params;
 
   const res = await fetch(aiUrl("/api/ai/generate-global"), {

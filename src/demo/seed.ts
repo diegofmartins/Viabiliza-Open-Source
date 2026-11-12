@@ -1,4 +1,4 @@
-import type { DemoEtp, DemoEtpRecord, DemoUser, DemoAgency, DemoSettings, DemoStorage, SaveEtpInput } from './types';
+import type { DemoEtp, DemoEtpRecord, DemoUser, DemoAgency, DemoSettings, DemoStorage, SaveEtpInput, DemoTimestamp } from './types';
 import { INITIAL_STATE } from '../constants/etpInitialState';
 
 // --- Dados fictícios: 2 ETPs ---
@@ -39,13 +39,13 @@ export const demoEtpNotebooks: DemoEtpRecord = {
     seconds: new Date('2026-11-03T13:00:00.000Z').getTime() / 1000,
     nanoseconds: new Date('2026-11-03T13:00:00.000Z').getTime() % 1000000000,
     toISO: () => new Date('2026-11-03T13:00:00.000Z').toISOString(),
-  },
+  } as any,
   updatedAt: {
     toDate: () => new Date('2026-11-10T09:15:00.000Z'),
     seconds: new Date('2026-11-10T09:15:00.000Z').getTime() / 1000,
     nanoseconds: new Date('2026-11-10T09:15:00.000Z').getTime() % 1000000000,
     toISO: () => new Date('2026-11-10T09:15:00.000Z').toISOString(),
-  },
+  } as any,
 };
 
 // --- ETP 2: Contratação de manutenção predial preventiva ---
@@ -85,13 +85,13 @@ export const demoEtpManutencao: DemoEtpRecord = {
     seconds: new Date('2026-10-01T11:30:00.000Z').getTime() / 1000,
     nanoseconds: new Date('2026-10-01T11:30:00.000Z').getTime() % 1000000000,
     toISO: () => new Date('2026-10-01T11:30:00.000Z').toISOString(),
-  },
+  } as any,
   updatedAt: {
     toDate: () => new Date('2026-10-28T16:40:00.000Z'),
     seconds: new Date('2026-10-28T16:40:00.000Z').getTime() / 1000,
     nanoseconds: new Date('2026-10-28T16:40:00.000Z').getTime() % 1000000000,
     toISO: () => new Date('2026-10-28T16:40:00.000Z').toISOString(),
-  },
+  } as any,
 };
 
 // --- Dados fictícios: 3 usuários ---

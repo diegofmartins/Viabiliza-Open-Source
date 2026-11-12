@@ -1,5 +1,3 @@
-import { import.meta } from 'vue';
-
 const env = (import.meta as any).env || {} as Record<string, string | undefined>;
 
 export const IS_DEMO: boolean = env.VITE_DEMO_MODE === 'true';

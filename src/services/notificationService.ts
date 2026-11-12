@@ -1,3 +1,5 @@
+const IS_DEMO = import.meta.env.VITE_DEMO_MODE === 'true';
+const DEMO_NOTICE = 'DEMONSTRAÇÃO — dados fictícios';
 
 /**
  * Service to send notifications to Google Chat via Webhook
@@ -6,12 +8,11 @@
 const ENV_WEBHOOK_URL = import.meta.env.VITE_GOOGLE_CHAT_WEBHOOK_URL;
 
 export async function sendGoogleChatNotification(message: string, overrideUrl?: string) {
-  const url = overrideUrl || ENV_WEBHOOK_URL;
-  
-  if (!url) {
-    console.warn("Google Chat Webhook URL not configured.");
+  if (IS_DEMO) {
+    console.log(DEMO_NOTICE + ": " + message);
     return;
   }
+  const url = overrideUrl || import.meta.env.VITE_GOOGLE_CHAT_WEBHOOK_URL;
 
   try {
     // Tentativa 1: Requisição padrão (pode falhar por CORS em sites estáticos)
@@ -37,15 +38,27 @@ export async function sendGoogleChatNotification(message: string, overrideUrl?: 
 
 export async function notifyNewUserRegistration(userEmail: string, displayName: string, webhookUrl?: string) {
   const message = `🚀 *Novo Registro no ETP Digital*\n\n*Usuário:* ${displayName}\n*E-mail:* ${userEmail}\n*Status:* Aguardando Aprovação\n\nPor favor, acesse o Painel Master para aprovar o acesso.`;
+  if (IS_DEMO) {
+    console.log(DEMO_NOTICE + ": " + message);
+    return;
+  }
   await sendGoogleChatNotification(message, webhookUrl);
 }
 
 export async function notifyUserApproved(userEmail: string, displayName: string, webhookUrl?: string) {
   const message = `✅ *Usuário Aprovado no ETP Digital*\n\n*Usuário:* ${displayName}\n*E-mail:* ${userEmail}\n\nO acesso ao sistema foi liberado.`;
+  if (IS_DEMO) {
+    console.log(DEMO_NOTICE + ": " + message);
+    return;
+  }
   await sendGoogleChatNotification(message, webhookUrl);
 }
 
 export async function notifyNewETPCreated(userEmail: string, etpTitle: string, webhookUrl?: string) {
   const message = `📄 *Novo ETP Criado*\n\n*Título:* ${etpTitle}\n*Autor:* ${userEmail}\n\nUm novo Estudo Técnico Preliminar foi iniciado no sistema.`;
+  if (IS_DEMO) {
+    console.log(DEMO_NOTICE + ": " + message);
+    return;
+  }
   await sendGoogleChatNotification(message, webhookUrl);
 }
